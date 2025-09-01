@@ -50,6 +50,7 @@ INC += \
 	-isystem esp-idf/components/driver/touch_sensor/include \
 	-isystem esp-idf/components/driver/touch_sensor/$(IDF_TARGET)/include \
 	-isystem esp-idf/components/driver/twai/include \
+	-isystem esp-idf/components/driver/i2c/include \
 	-isystem esp-idf/components/efuse/include \
 	-isystem esp-idf/components/efuse/$(IDF_TARGET)/include \
 	-isystem esp-idf/components/$(IDF_TARGET)/include \
@@ -90,6 +91,7 @@ INC += \
 	-isystem esp-idf/components/esp_rom/$(IDF_TARGET)/include \
 	-isystem esp-idf/components/esp_rom/$(IDF_TARGET)/include/$(IDF_TARGET) \
 	-isystem esp-idf/components/esp_security/include \
+	-isystem esp-idf/components/esp_rom/include/$(IDF_TARGET) \
 	-isystem esp-idf/components/esp_system/include \
 	-isystem esp-idf/components/esp_timer/include \
 	-isystem esp-idf/components/esp_wifi/include \
@@ -783,6 +785,9 @@ endif
 ifneq ($(CIRCUITPY_SDIOIO),0)
 	ESP_IDF_COMPONENTS_LINK += sdmmc esp_driver_sdmmc
 endif
+
+# Add any board-specific extra components
+ESP_IDF_COMPONENTS_LINK += $(ESP_IDF_EXTRA_COMPONENTS)
 
 ESP_IDF_COMPONENTS_EXPANDED = $(foreach component, $(ESP_IDF_COMPONENTS_LINK), $(BUILD)/esp-idf/esp-idf/$(component)/lib$(component).a)
 
