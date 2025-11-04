@@ -495,6 +495,11 @@ CFLAGS += -isystem esp-camera/driver/include
 CFLAGS += -isystem esp-camera/conversions/include
 endif
 
+ifneq ($(CIRCUITPY_RM690B0_LVGL),0)
+CFLAGS += -isystem components/lvgl
+CFLAGS += -isystem components/lvgl/src
+endif
+
 ifneq ($(CIRCUITPY_RCLCPY),0)
 CFLAGS += -isystem microros-lib/include
 CFLAGS += -isystem microros-lib/include/rcl
@@ -819,6 +824,10 @@ endif
 ifneq ($(CIRCUITPY_ESPCAMERA),0)
 ESP_IDF_COMPONENTS_EXPANDED += $(BUILD)/esp-idf/esp-idf/esp-camera/libesp-camera.a
 #$(error $(ESP_IDF_COMPONENTS_EXPANDED))
+endif
+
+ifneq ($(CIRCUITPY_RM690B0_LVGL),0)
+ESP_IDF_COMPONENTS_EXPANDED += $(BUILD)/esp-idf/esp-idf/lvgl/liblvgl.a
 endif
 
 ifneq ($(CIRCUITPY_RCLCPY),0)

@@ -409,6 +409,11 @@ typedef long mp_off_t;
 #define CIRCUITPY_RM690B0 (0)
 #endif
 
+// RM690B0 LVGL integration
+#ifndef CIRCUITPY_RM690B0_LVGL
+#define CIRCUITPY_RM690B0_LVGL (0)
+#endif
+
 // This is not a top-level module; it's microcontroller.nvm.
 #if CIRCUITPY_NVM
 extern const struct _mp_obj_module_t nvm_module;

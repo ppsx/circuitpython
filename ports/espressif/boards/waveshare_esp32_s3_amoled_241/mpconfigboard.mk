@@ -26,7 +26,7 @@ CIRCUITPY_ESP_PSRAM_MODE = opi
 CIRCUITPY_ESP_PSRAM_FREQ = 80m
 
 # Add extra ESP-IDF components needed for board_init.c and rm690b0 module
-ESP_IDF_EXTRA_COMPONENTS += driver freertos esp_lcd sdmmc esp_driver_sdmmc esp_driver_sdspi
+ESP_IDF_EXTRA_COMPONENTS += driver freertos esp_lcd sdmmc esp_driver_sdmmc esp_driver_sdspi lvgl
 
 # Build optimization
 OPTIMIZATION_FLAGS = -Os
@@ -39,6 +39,7 @@ CIRCUITPY_BITMAPTOOLS = 1
 CIRCUITPY_JPEGIO = 1
 CIRCUITPY_FRAMEBUFFERIO = 1
 CIRCUITPY_RM690B0 = 1
+CIRCUITPY_RM690B0_LVGL = 1
 
 # Enable ESP-NOW for peer-to-peer wireless communication
 CIRCUITPY_ESPNOW = 1

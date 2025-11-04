@@ -381,6 +381,9 @@ endif
 ifeq ($(CIRCUITPY_RM690B0),1)
 SRC_PATTERNS += rm690b0/%
 endif
+ifeq ($(CIRCUITPY_RM690B0_LVGL),1)
+SRC_PATTERNS += rm690b0_lvgl/%
+endif
 ifeq ($(CIRCUITPY_SOCKETPOOL),1)
 SRC_PATTERNS += socketpool/%
 endif
@@ -582,6 +585,32 @@ SRC_COMMON_HAL_ALL = \
 	wifi/ScannedNetworks.c \
 	wifi/__init__.c \
 	rm690b0/RM690B0.c \
+	rm690b0_lvgl/RM690B0_LVGL.c \
+	rm690b0_lvgl/Widget.c \
+	rm690b0_lvgl/Label.c \
+	rm690b0_lvgl/Button.c \
+	rm690b0_lvgl/Slider.c \
+	rm690b0_lvgl/Checkbox.c \
+	rm690b0_lvgl/Switch.c \
+	rm690b0_lvgl/Bar.c \
+	rm690b0_lvgl/Arc.c \
+	rm690b0_lvgl/Dropdown.c \
+	rm690b0_lvgl/Roller.c \
+	rm690b0_lvgl/Spinner.c \
+	rm690b0_lvgl/Container.c \
+	rm690b0_lvgl/Msgbox.c \
+	rm690b0_lvgl/List.c \
+	rm690b0_lvgl/Spinbox.c \
+	rm690b0_lvgl/Tabview.c \
+	rm690b0_lvgl/Table.c \
+	rm690b0_lvgl/Buttonmatrix.c \
+	rm690b0_lvgl/Textarea.c \
+	rm690b0_lvgl/Keyboard.c \
+	rm690b0_lvgl/Chart.c \
+	rm690b0_lvgl/Canvas.c \
+	rm690b0_lvgl/Line.c \
+	rm690b0_lvgl/Scale.c \
+	rm690b0_lvgl/Font.c \
 
 SRC_COMMON_HAL = $(filter $(SRC_PATTERNS), $(SRC_COMMON_HAL_ALL))
 
@@ -642,6 +671,34 @@ $(filter $(SRC_PATTERNS), \
 	wifi/Packet.c \
 	wifi/PowerManagement.c \
 	rm690b0/__init__.c \
+	rm690b0/image_converter.c \
+	rm690b0_lvgl/__init__.c \
+	rm690b0_lvgl/RM690B0_LVGL.c \
+	rm690b0_lvgl/Widget.c \
+	rm690b0_lvgl/Label.c \
+	rm690b0_lvgl/Button.c \
+	rm690b0_lvgl/Slider.c \
+	rm690b0_lvgl/Checkbox.c \
+	rm690b0_lvgl/Switch.c \
+	rm690b0_lvgl/Bar.c \
+	rm690b0_lvgl/Arc.c \
+	rm690b0_lvgl/Dropdown.c \
+	rm690b0_lvgl/Roller.c \
+	rm690b0_lvgl/Spinner.c \
+	rm690b0_lvgl/Container.c \
+	rm690b0_lvgl/Msgbox.c \
+	rm690b0_lvgl/List.c \
+	rm690b0_lvgl/Spinbox.c \
+	rm690b0_lvgl/Tabview.c \
+	rm690b0_lvgl/Table.c \
+	rm690b0_lvgl/Buttonmatrix.c \
+	rm690b0_lvgl/Textarea.c \
+	rm690b0_lvgl/Keyboard.c \
+	rm690b0_lvgl/Chart.c \
+	rm690b0_lvgl/Canvas.c \
+	rm690b0_lvgl/Line.c \
+	rm690b0_lvgl/Scale.c \
+	rm690b0_lvgl/Font.c \
 )
 
 ifeq ($(CIRCUITPY_BLEIO_HCI),1)
@@ -928,6 +985,11 @@ ifneq ($(filter 1,$(CIRCUITPY_JPEGIO) $(CIRCUITPY_RM690B0)),)
 SRC_MOD += lib/tjpgd/src/tjpgd.c
 $(BUILD)/lib/tjpgd/src/tjpgd.o: CFLAGS += -Wno-shadow -Wno-cast-align
 CFLAGS_MOD += -I$(TOP)/lib/tjpgd/src
+endif
+
+ifneq ($(filter 1,$(CIRCUITPY_JPEGIO) $(CIRCUITPY_RM690B0)),)
+SRC_MOD += lib/esp_jpeg/src/esp_jpeg.c
+CFLAGS_MOD += -I$(TOP)/lib/tjpgd/src -I$(TOP)/lib/esp_jpeg/include
 endif
 
 ifeq ($(CIRCUITPY_HASHLIB_MBEDTLS_ONLY),1)
