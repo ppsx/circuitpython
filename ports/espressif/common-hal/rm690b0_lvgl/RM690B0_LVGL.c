@@ -46,8 +46,8 @@
 #define LVGL_TICK_PERIOD_MS     2
 #define LVGL_BUFFER_ROWS        10  // Reduced to 10 rows to fit in internal RAM (10 * 600 = 6000 pixels)
 
-// RM690B0 color swap macro (same as in rm690b0 driver)
-#define RGB565_SWAP_GB(c) ((uint16_t)((((c) & 0xF800) >> 3) | (((c) & 0x00E0) << 8) | (((c) & 0x0700) >> 8) | (((c) & 0x001F) << 3)))
+// RM690B0 color swap macro (synced with rm690b0 driver)
+#define RGB565_SWAP_GB(c) (__builtin_bswap16(c))
 
 static const char *TAG = "rm690b0_lvgl";
 
@@ -616,4 +616,32 @@ void common_hal_rm690b0_lvgl_scroll_screen(rm690b0_lvgl_rm690b0_lvgl_obj_t *self
 mp_int_t common_hal_rm690b0_lvgl_get_scroll_y(rm690b0_lvgl_rm690b0_lvgl_obj_t *self) {
     (void)self;
     return lv_obj_get_scroll_y(lv_scr_act());
+}
+
+void common_hal_rm690b0_lvgl_set_theme_color(rm690b0_lvgl_rm690b0_lvgl_obj_t *self, uint32_t primary, uint32_t secondary, bool dark) {
+    if (!self->display_initialized) {
+        mp_raise_msg(&mp_type_RuntimeError,
+            MP_ERROR_TEXT("Display must be initialized first. Call init_display() before set_theme_color()."));
+        return;
+    }
+    
+    rm690b0_lvgl_impl_t *impl = (rm690b0_lvgl_impl_t *)self->impl;
+    lv_disp_t *disp = (lv_disp_t *)impl->lvgl_disp;
+    
+    // Reinitialize theme with new colors
+    lv_theme_t *theme = lv_theme_default_init(
+        disp,
+        lv_color_hex(primary),
+        lv_color_hex(secondary),
+        dark,
+        LV_FONT_DEFAULT
+    );
+    
+    lv_disp_set_theme(disp, theme);
+    
+    // Force refresh to apply new theme
+    lv_obj_invalidate(lv_scr_act());
+    
+    ESP_LOGI(TAG, "Theme updated: primary=0x%06lX, secondary=0x%06lX, dark=%d", 
+             (unsigned long)primary, (unsigned long)secondary, dark);
 }

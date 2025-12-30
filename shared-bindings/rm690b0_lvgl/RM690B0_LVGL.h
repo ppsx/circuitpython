@@ -43,3 +43,6 @@ mp_int_t common_hal_rm690b0_lvgl_get_height(const rm690b0_lvgl_rm690b0_lvgl_obj_
 
 // Initialize rendering subsystem (workaround for touch race condition)
 void common_hal_rm690b0_lvgl_init_rendering(rm690b0_lvgl_rm690b0_lvgl_obj_t *self);
+
+// Set theme colors
+void common_hal_rm690b0_lvgl_set_theme_color(rm690b0_lvgl_rm690b0_lvgl_obj_t *self, uint32_t primary, uint32_t secondary, bool dark);

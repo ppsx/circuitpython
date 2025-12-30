@@ -291,6 +291,39 @@ MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_lvgl_get_height_obj, rm690b0_lvgl_get_height);
 MP_PROPERTY_GETTER(rm690b0_lvgl_height_obj,
     (mp_obj_t)&rm690b0_lvgl_get_height_obj);
 
+//|     def set_theme_color(self, primary: int, secondary: int = 0xFF0000, dark: bool = False) -> None:
+//|         """Set the LVGL theme primary and secondary colors.
+//|
+//|         :param int primary: Primary color as 0xRRGGBB hex value (e.g., 0x0066FF for blue)
+//|         :param int secondary: Secondary color as 0xRRGGBB hex value (default: 0xFF0000 red)
+//|         :param bool dark: Use dark theme variant if True, light if False
+//|
+//|         Example::
+//|
+//|             lvgl.set_theme_color(0x0066FF)  # Blue primary, red secondary, light theme
+//|             lvgl.set_theme_color(0x00FF00, 0xFF00FF, dark=True)  # Green+Magenta, dark theme
+//|         """
+//|         ...
+//|
+static mp_obj_t rm690b0_lvgl_set_theme_color(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_primary, ARG_secondary, ARG_dark };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_primary, MP_ARG_REQUIRED | MP_ARG_INT },
+        { MP_QSTR_secondary, MP_ARG_INT, {.u_int = 0xFF0000} },
+        { MP_QSTR_dark, MP_ARG_BOOL, {.u_bool = false} },
+    };
+    rm690b0_lvgl_rm690b0_lvgl_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+    common_hal_rm690b0_lvgl_set_theme_color(
+        self,
+        (uint32_t)args[ARG_primary].u_int,
+        (uint32_t)args[ARG_secondary].u_int,
+        args[ARG_dark].u_bool);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(rm690b0_lvgl_set_theme_color_obj, 1, rm690b0_lvgl_set_theme_color);
+
 static const mp_rom_map_elem_t rm690b0_lvgl_rm690b0_lvgl_locals_dict_table[] = {
     // Methods
     { MP_ROM_QSTR(MP_QSTR_deinit), MP_ROM_PTR(&rm690b0_lvgl_rm690b0_lvgl_deinit_obj) },
@@ -303,6 +336,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_rm690b0_lvgl_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_test_draw), MP_ROM_PTR(&rm690b0_lvgl_test_draw_obj) },
     { MP_ROM_QSTR(MP_QSTR_scroll_screen), MP_ROM_PTR(&rm690b0_lvgl_scroll_screen_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_scroll_y), MP_ROM_PTR(&rm690b0_lvgl_get_scroll_y_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_theme_color), MP_ROM_PTR(&rm690b0_lvgl_set_theme_color_obj) },
     
     // Properties
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_width_obj) },
