@@ -423,4 +423,5 @@
 	url = https://github.com/CytronTechnologies/CircuitPython_edupico2_paj7620.git
 [submodule "ports/espressif/components/lvgl"]
 	path = ports/espressif/components/lvgl
-	url = https://github.com/lvgl/lvgl.git
+	url = https://github.com/ppsx/lvgl.git
+	branch = amoled-fixes
