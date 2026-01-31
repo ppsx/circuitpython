@@ -246,4 +246,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_textarea_make_new,
     locals_dict, &rm690b0_lvgl_textarea_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

@@ -17,7 +17,7 @@ void common_hal_rm690b0_lvgl_spinner_construct(rm690b0_lvgl_spinner_obj_t *self,
     if (spinner == NULL) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL spinner"));
     }
-    
+
     // Set default properties
     self->base.native_obj = spinner;
     self->base.callback = mp_const_none;

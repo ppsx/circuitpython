@@ -89,7 +89,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_container_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_opa), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_opa_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_parent), MP_ROM_PTR(&rm690b0_lvgl_widget_set_parent_obj) },
     { MP_ROM_QSTR(MP_QSTR_delete), MP_ROM_PTR(&rm690b0_lvgl_widget_delete_obj) },
-    
+
     // Container-specific methods
     // Container specific
     { MP_ROM_QSTR(MP_QSTR_set_flex_flow), MP_ROM_PTR(&rm690b0_lvgl_container_set_flex_flow_obj) },

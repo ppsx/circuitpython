@@ -59,7 +59,7 @@ static mp_obj_t rm690b0_lvgl_list_add_btn(size_t n_args, const mp_obj_t *pos_arg
     if (args[ARG_icon].u_obj != mp_const_none) {
         icon = mp_obj_str_get_str(args[ARG_icon].u_obj);
     }
-    
+
     return common_hal_rm690b0_lvgl_list_add_btn(self, icon, text);
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(rm690b0_lvgl_list_add_btn_obj, 1, rm690b0_lvgl_list_add_btn);
@@ -85,7 +85,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_list_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_text_font), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_text_font_obj) },

@@ -228,7 +228,7 @@ MP_DEFINE_CONST_OBJ_TYPE(
     MP_QSTR_ChartSeries,
     MP_TYPE_FLAG_NONE,
     locals_dict, &rm690b0_lvgl_chart_series_locals_dict
-);
+    );
 
 static const mp_rom_map_elem_t rm690b0_lvgl_chart_locals_dict_table[] = {
     // Inherited Widget properties
@@ -260,4 +260,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_chart_make_new,
     locals_dict, &rm690b0_lvgl_chart_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

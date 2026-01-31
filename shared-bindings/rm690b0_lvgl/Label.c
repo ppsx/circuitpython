@@ -42,12 +42,12 @@ static mp_obj_t rm690b0_lvgl_label_make_new(const mp_obj_type_t *type, size_t n_
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     rm690b0_lvgl_label_obj_t *self = mp_obj_malloc(rm690b0_lvgl_label_obj_t, &rm690b0_lvgl_label_type);
-    
+
     const char *text = "Label";
     if (args[ARG_text].u_obj != MP_OBJ_NULL) {
         text = mp_obj_str_get_str(args[ARG_text].u_obj);
     }
-    
+
     common_hal_rm690b0_lvgl_label_construct(self, text);
     return MP_OBJ_FROM_PTR(self);
 }
@@ -91,7 +91,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_label_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_text_font), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_text_font_obj) },
@@ -101,7 +101,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_label_locals_dict_table[] = {
 
     // Label-specific properties
     { MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&rm690b0_lvgl_label_text_obj) },
-    
+
     // Label-specific methods
     { MP_ROM_QSTR(MP_QSTR_set_text_color), MP_ROM_PTR(&rm690b0_lvgl_label_set_text_color_obj) },
 };
@@ -114,4 +114,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_label_make_new,
     locals_dict, &rm690b0_lvgl_label_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

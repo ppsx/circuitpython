@@ -174,7 +174,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_widget_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_text_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_text_color_obj) },

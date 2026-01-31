@@ -164,7 +164,7 @@ static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     // Prevents race condition during first image render when LVGL's
     // image cache is being initialized. Touch interrupts during this
     // initialization can cause memory corruption and board resets.
-    if (rm690b0_lvgl_singleton != NULL && 
+    if (rm690b0_lvgl_singleton != NULL &&
         !rm690b0_lvgl_singleton->image_subsystem_initialized) {
         return;  // Defer touch processing until image subsystem is ready
     }
@@ -187,7 +187,7 @@ static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
             // Raw touch coordinates (portrait orientation: 0-449 x, 0-599 y)
             uint16_t touch_x = ((read_buf[1] & 0x0F) << 8) | read_buf[2];
             uint16_t touch_y = ((read_buf[3] & 0x0F) << 8) | read_buf[4];
-            
+
             // Transform from portrait touch (450x600) to landscape display (600x450)
             // Display rotation 0 (landscape): touch is rotated 90° counter-clockwise
             // Transform: display_x = (599 - touch_y), display_y = touch_x
@@ -325,12 +325,12 @@ void common_hal_rm690b0_lvgl_init_display(rm690b0_lvgl_rm690b0_lvgl_obj_t *self)
     // Allocate DMA buffers (internal RAM) for double-buffered transfers
     // Ensure size covers alignment padding (max 2px extra width/height)
     size_t dma_buf_pixels = (impl->hor_res + 4) * (LVGL_BUFFER_ROWS + 2);
-    
+
     // Allocate in internal RAM (MALLOC_CAP_DMA) for stability
     // We reduced buffer size so 2 buffers (approx 26KB) easily fit in SRAM
     impl->dma_buffers[0] = heap_caps_malloc(dma_buf_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
     impl->dma_buffers[1] = heap_caps_malloc(dma_buf_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
-    
+
     if (impl->dma_buffers[0] == NULL || impl->dma_buffers[1] == NULL) {
         if (impl->dma_buffers[0]) heap_caps_free(impl->dma_buffers[0]);
         if (impl->dma_buffers[1]) heap_caps_free(impl->dma_buffers[1]);
@@ -368,7 +368,7 @@ void common_hal_rm690b0_lvgl_init_display(rm690b0_lvgl_rm690b0_lvgl_obj_t *self)
 
     self->display_initialized = true;
     ESP_LOGI(TAG, "LVGL display initialization complete");
-    
+
     // Automatically initialize rendering subsystem to prevent touch race condition
     // This creates a temporary off-screen image and renders it to fully initialize
     // LVGL's image cache and rendering pipeline before touch callbacks can fire
@@ -382,7 +382,7 @@ void common_hal_rm690b0_lvgl_init_touch(rm690b0_lvgl_rm690b0_lvgl_obj_t *self, m
             MP_ERROR_TEXT("Display must be initialized before touch. Call init_display() first."));
         return;
     }
-    
+
     // Verify rendering subsystem was initialized by init_display()
     // This should always be true since init_display() now calls init_rendering() automatically
     if (!self->image_subsystem_initialized) {
@@ -432,7 +432,7 @@ void common_hal_rm690b0_lvgl_deinit_all(void) {
 static void button_event_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *btn = lv_event_get_target(e);
-    
+
     if (code == LV_EVENT_PRESSED) {
         // Button pressed - make it darker
         lv_obj_set_style_bg_opa(btn, 200, 0);
@@ -474,7 +474,7 @@ void common_hal_rm690b0_lvgl_test_draw(rm690b0_lvgl_rm690b0_lvgl_obj_t *self) {
     lv_obj_set_pos(btn1, 20, 50);
     lv_obj_set_style_bg_color(btn1, lv_color_hex(0xFF0000), 0);
     lv_obj_add_event_cb(btn1, button_event_cb, LV_EVENT_ALL, NULL);
-    
+
     lv_obj_t *label1 = lv_label_create(btn1);
     lv_label_set_text(label1, "RED\nBUTTON");
     lv_obj_set_style_text_color(label1, lv_color_white(), 0);
@@ -486,7 +486,7 @@ void common_hal_rm690b0_lvgl_test_draw(rm690b0_lvgl_rm690b0_lvgl_obj_t *self) {
     lv_obj_set_pos(btn2, 400, 50);
     lv_obj_set_style_bg_color(btn2, lv_color_hex(0x00FF00), 0);
     lv_obj_add_event_cb(btn2, button_event_cb, LV_EVENT_ALL, NULL);
-    
+
     lv_obj_t *label2 = lv_label_create(btn2);
     lv_label_set_text(label2, "GREEN\nBUTTON");
     lv_obj_set_style_text_color(label2, lv_color_black(), 0);
@@ -498,7 +498,7 @@ void common_hal_rm690b0_lvgl_test_draw(rm690b0_lvgl_rm690b0_lvgl_obj_t *self) {
     lv_obj_set_pos(btn3, 20, 280);
     lv_obj_set_style_bg_color(btn3, lv_color_hex(0x0000FF), 0);
     lv_obj_add_event_cb(btn3, button_event_cb, LV_EVENT_ALL, NULL);
-    
+
     lv_obj_t *label3 = lv_label_create(btn3);
     lv_label_set_text(label3, "BLUE\nBUTTON");
     lv_obj_set_style_text_color(label3, lv_color_white(), 0);
@@ -510,7 +510,7 @@ void common_hal_rm690b0_lvgl_test_draw(rm690b0_lvgl_rm690b0_lvgl_obj_t *self) {
     lv_obj_set_pos(btn4, 400, 280);
     lv_obj_set_style_bg_color(btn4, lv_color_hex(0xFFFF00), 0);
     lv_obj_add_event_cb(btn4, button_event_cb, LV_EVENT_ALL, NULL);
-    
+
     lv_obj_t *label4 = lv_label_create(btn4);
     lv_label_set_text(label4, "YELLOW\nBUTTON");
     lv_obj_set_style_text_color(label4, lv_color_black(), 0);
@@ -546,49 +546,49 @@ void common_hal_rm690b0_lvgl_init_rendering(rm690b0_lvgl_rm690b0_lvgl_obj_t *sel
     //   lvgl.init_display()
     //   lvgl.init_rendering()  # Call this before init_touch()
     //   lvgl.init_touch(i2c)
-    
+
     if (!self->display_initialized) {
         mp_raise_msg(&mp_type_RuntimeError,
             MP_ERROR_TEXT("Display must be initialized first. Call init_display() before init_rendering()."));
         return;
     }
-    
+
     if (self->image_subsystem_initialized) {
         ESP_LOGW(TAG, "Image subsystem already initialized");
         return;
     }
-    
+
     ESP_LOGI(TAG, "Preparing image subsystem for touch initialization...");
-    
+
     // CRITICAL: Set flag BEFORE any lv_task_handler() calls
     // This prevents touch callbacks from firing during initialization
     self->image_subsystem_initialized = true;
-    
+
     // Create a temporary off-screen image to initialize LVGL's image cache
     lv_obj_t *dummy_img = lv_img_create(lv_scr_act());
     if (dummy_img == NULL) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create dummy image"));
         return;
     }
-    
+
     // Position off-screen so it's not visible
     lv_obj_set_pos(dummy_img, -1000, -1000);
     lv_obj_set_size(dummy_img, 1, 1);
-    
+
     // Create minimal 1x1 image descriptor
     static lv_img_dsc_t dummy_dsc;
     static const uint8_t dummy_data[2] = {0x00, 0x00}; // 1 pixel RGB565
-    
+
     dummy_dsc.header.always_zero = 0;
     dummy_dsc.header.w = 1;
     dummy_dsc.header.h = 1;
     dummy_dsc.data_size = 2;
     dummy_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
     dummy_dsc.data = dummy_data;
-    
+
     // Set the dummy image source
     lv_img_set_src(dummy_img, &dummy_dsc);
-    
+
     // Render 3 times to fully initialize image subsystem
     // First render: Allocates image cache structures
     // Second render: Completes DMA buffer setup
@@ -597,13 +597,13 @@ void common_hal_rm690b0_lvgl_init_rendering(rm690b0_lvgl_rm690b0_lvgl_obj_t *sel
         lv_task_handler();
         ESP_LOGD(TAG, "Image subsystem initialization render %d/3", i + 1);
     }
-    
+
     // Clean up dummy image
     lv_obj_del(dummy_img);
-    
+
     // One final render to process the deletion
     lv_task_handler();
-    
+
     ESP_LOGI(TAG, "Image subsystem ready - safe to initialize touch");
 }
 
@@ -624,10 +624,10 @@ void common_hal_rm690b0_lvgl_set_theme_color(rm690b0_lvgl_rm690b0_lvgl_obj_t *se
             MP_ERROR_TEXT("Display must be initialized first. Call init_display() before set_theme_color()."));
         return;
     }
-    
+
     rm690b0_lvgl_impl_t *impl = (rm690b0_lvgl_impl_t *)self->impl;
     lv_disp_t *disp = (lv_disp_t *)impl->lvgl_disp;
-    
+
     // Reinitialize theme with new colors
     lv_theme_t *theme = lv_theme_default_init(
         disp,
@@ -636,12 +636,12 @@ void common_hal_rm690b0_lvgl_set_theme_color(rm690b0_lvgl_rm690b0_lvgl_obj_t *se
         dark,
         LV_FONT_DEFAULT
     );
-    
+
     lv_disp_set_theme(disp, theme);
-    
+
     // Force refresh to apply new theme
     lv_obj_invalidate(lv_scr_act());
-    
-    ESP_LOGI(TAG, "Theme updated: primary=0x%06lX, secondary=0x%06lX, dark=%d", 
+
+    ESP_LOGI(TAG, "Theme updated: primary=0x%06lX, secondary=0x%06lX, dark=%d",
              (unsigned long)primary, (unsigned long)secondary, dark);
 }

@@ -39,10 +39,10 @@ void common_hal_rm690b0_lvgl_msgbox_construct(rm690b0_lvgl_msgbox_obj_t *self, c
     // Allocate array for pointers. +1 for terminator.
     self->btn_map = m_malloc((btn_count + 1) * sizeof(char *));
     if (self->btn_map == NULL) {
-         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate memory for msgbox buttons"));
-         return;
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate memory for msgbox buttons"));
+        return;
     }
-    
+
     for (size_t i = 0; i < btn_count; i++) {
         self->btn_map[i] = mp_obj_str_get_str(btn_items[i]);
     }
@@ -55,11 +55,11 @@ void common_hal_rm690b0_lvgl_msgbox_construct(rm690b0_lvgl_msgbox_obj_t *self, c
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL msgbox"));
         return;
     }
-    
+
     lv_obj_center(mbox);
-    
+
     lv_obj_add_event_cb(mbox, msgbox_event_handler, LV_EVENT_ALL, self);
-    
+
     self->base.native_obj = mbox;
     self->base.callback = mp_const_none;
 }

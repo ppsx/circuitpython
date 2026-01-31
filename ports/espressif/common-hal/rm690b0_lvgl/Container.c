@@ -17,7 +17,7 @@ void common_hal_rm690b0_lvgl_container_construct(rm690b0_lvgl_container_obj_t *s
     if (container == NULL) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL container"));
     }
-    
+
     // Set default properties
     self->base.native_obj = container;
     self->base.callback = mp_const_none;

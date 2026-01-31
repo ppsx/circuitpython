@@ -27,9 +27,9 @@ void common_hal_rm690b0_lvgl_buttonmatrix_construct(rm690b0_lvgl_buttonmatrix_ob
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL buttonmatrix"));
         return;
     }
-    
+
     lv_obj_add_event_cb(btnm, buttonmatrix_event_handler, LV_EVENT_VALUE_CHANGED, self);
-    
+
     self->base.native_obj = btnm;
     self->base.callback = mp_const_none;
 
@@ -51,7 +51,7 @@ void common_hal_rm690b0_lvgl_buttonmatrix_set_map(rm690b0_lvgl_buttonmatrix_obj_
     // Actually, Msgbox keeps it until closed.
     // For Buttonmatrix, map can change. So we should realloc or free/alloc.
     // But `rm690b0_lvgl_buttonmatrix_obj_t` struct layout is in shared bindings.
-    
+
     if (self->btn_map != NULL) {
         // m_free(self->btn_map); // If we track allocation. m_malloc is GC heap?
         // Actually m_malloc returns GC managed memory. If we overwrite the pointer, the old block becomes unreachable (unless LVGL holds it).
@@ -66,10 +66,10 @@ void common_hal_rm690b0_lvgl_buttonmatrix_set_map(rm690b0_lvgl_buttonmatrix_obj_
 
     // Allocate array for pointers. +1 for terminator.
     self->btn_map = m_malloc((btn_count + 1) * sizeof(char *));
-    
+
     for (size_t i = 0; i < btn_count; i++) {
         const char *s = mp_obj_str_get_str(btn_items[i]);
-        // Handle "\n" in string? LVGL uses "\n" in the array to break lines? 
+        // Handle "\n" in string? LVGL uses "\n" in the array to break lines?
         // Actually LVGL expects the string itself to be "\n" to break line.
         // So if user passed "\n" string in list, it works.
         self->btn_map[i] = s;

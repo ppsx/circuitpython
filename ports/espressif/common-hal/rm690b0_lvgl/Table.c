@@ -16,7 +16,7 @@ void common_hal_rm690b0_lvgl_table_construct(rm690b0_lvgl_table_obj_t *self) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL table"));
         return;
     }
-    
+
     self->base.native_obj = table;
     self->base.callback = mp_const_none;
 }

@@ -41,13 +41,13 @@ static mp_obj_t rm690b0_lvgl_slider_make_new(const mp_obj_type_t *type, size_t n
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     rm690b0_lvgl_slider_obj_t *self = mp_obj_malloc(rm690b0_lvgl_slider_obj_t, &rm690b0_lvgl_slider_type);
-    
+
     // Initialize callback to None
     self->on_change_handler = mp_const_none;
-    
+
     mp_int_t min_value = args[ARG_min_value].u_int;
     mp_int_t max_value = args[ARG_max_value].u_int;
-    
+
     common_hal_rm690b0_lvgl_slider_construct(self, min_value, max_value);
     return MP_OBJ_FROM_PTR(self);
 }
@@ -159,19 +159,19 @@ static const mp_rom_map_elem_t rm690b0_lvgl_slider_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_opa), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_opa_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_parent), MP_ROM_PTR(&rm690b0_lvgl_widget_set_parent_obj) },
     { MP_ROM_QSTR(MP_QSTR_delete), MP_ROM_PTR(&rm690b0_lvgl_widget_delete_obj) },
-    
+
     // Slider-specific properties
     { MP_ROM_QSTR(MP_QSTR_value), MP_ROM_PTR(&rm690b0_lvgl_slider_value_obj) },
     { MP_ROM_QSTR(MP_QSTR_min_value), MP_ROM_PTR(&rm690b0_lvgl_slider_min_value_obj) },
     { MP_ROM_QSTR(MP_QSTR_max_value), MP_ROM_PTR(&rm690b0_lvgl_slider_max_value_obj) },
     { MP_ROM_QSTR(MP_QSTR_on_change), MP_ROM_PTR(&rm690b0_lvgl_slider_on_change_obj) },
-    
+
     // Slider-specific methods
     { MP_ROM_QSTR(MP_QSTR_set_range), MP_ROM_PTR(&rm690b0_lvgl_slider_set_range_obj) },
 };
@@ -184,4 +184,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_slider_make_new,
     locals_dict, &rm690b0_lvgl_slider_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

@@ -41,7 +41,7 @@ static mp_obj_t rm690b0_lvgl_buttonmatrix_make_new(const mp_obj_type_t *type, si
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     rm690b0_lvgl_buttonmatrix_obj_t *self = mp_obj_malloc(rm690b0_lvgl_buttonmatrix_obj_t, &rm690b0_lvgl_buttonmatrix_type);
-    
+
     self->on_click_handler = mp_const_none;
     self->buttons_list = mp_const_none;
     self->btn_map = NULL;
@@ -133,7 +133,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_buttonmatrix_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_opa), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_opa_obj) },
@@ -143,7 +143,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_buttonmatrix_locals_dict_table[] = {
     // Buttonmatrix-specific properties
     // Buttonmatrix methods
     { MP_ROM_QSTR(MP_QSTR_set_map), MP_ROM_PTR(&rm690b0_lvgl_buttonmatrix_set_map_obj) },
-    
+
     // Properties
     { MP_ROM_QSTR(MP_QSTR_selected_btn), MP_ROM_PTR(&rm690b0_lvgl_buttonmatrix_selected_btn_obj) },
     { MP_ROM_QSTR(MP_QSTR_on_click), MP_ROM_PTR(&rm690b0_lvgl_buttonmatrix_on_click_obj) },
@@ -158,4 +158,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_buttonmatrix_make_new,
     locals_dict, &rm690b0_lvgl_buttonmatrix_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

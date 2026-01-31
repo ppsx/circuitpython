@@ -26,7 +26,7 @@ void common_hal_rm690b0_lvgl_label_set_text(rm690b0_lvgl_label_obj_t *self, cons
     lv_label_set_text(label, text);
 }
 
-const char* common_hal_rm690b0_lvgl_label_get_text(rm690b0_lvgl_label_obj_t *self) {
+const char *common_hal_rm690b0_lvgl_label_get_text(rm690b0_lvgl_label_obj_t *self) {
     lv_obj_t *label = (lv_obj_t *)self->base.native_obj;
     return lv_label_get_text(label);
 }

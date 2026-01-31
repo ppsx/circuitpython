@@ -27,14 +27,14 @@ void common_hal_rm690b0_lvgl_spinbox_construct(rm690b0_lvgl_spinbox_obj_t *self)
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL spinbox"));
         return;
     }
-    
+
     // Default setup
     lv_spinbox_set_rollover(sb, true);
     lv_spinbox_set_digit_format(sb, 4, 0); // 4 digits, no separator
     lv_spinbox_set_range(sb, 0, 9999);
-    
+
     lv_obj_add_event_cb(sb, spinbox_event_handler, LV_EVENT_VALUE_CHANGED, self);
-    
+
     self->base.native_obj = sb;
     self->base.callback = mp_const_none;
 }

@@ -16,11 +16,11 @@
 static void dropdown_event_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *dropdown = lv_event_get_target(e);
-    
+
     if (code == LV_EVENT_VALUE_CHANGED) {
         // Get the dropdown object from user_data
         rm690b0_lvgl_dropdown_obj_t *self = (rm690b0_lvgl_dropdown_obj_t *)lv_obj_get_user_data(dropdown);
-        
+
         if (self != NULL && self->on_change_handler != mp_const_none) {
             // Call the Python callback
             mp_call_function_1(self->on_change_handler, MP_OBJ_FROM_PTR(self));
@@ -34,18 +34,18 @@ void common_hal_rm690b0_lvgl_dropdown_construct(rm690b0_lvgl_dropdown_obj_t *sel
     if (dropdown == NULL) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL dropdown"));
     }
-    
+
     self->native_obj = dropdown;
-    
+
     // Set options
     lv_dropdown_set_options(dropdown, options);
-    
+
     // Store reference to self in user_data for event callbacks
     lv_obj_set_user_data(dropdown, self);
-    
+
     // Add event callback for value changes
     lv_obj_add_event_cb(dropdown, dropdown_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    
+
     // Set default size
     lv_obj_set_width(dropdown, 150);
 }
@@ -64,15 +64,15 @@ mp_int_t common_hal_rm690b0_lvgl_dropdown_get_selected(rm690b0_lvgl_dropdown_obj
 
 void common_hal_rm690b0_lvgl_dropdown_set_selected(rm690b0_lvgl_dropdown_obj_t *self, mp_int_t index) {
     lv_obj_t *dropdown = common_hal_rm690b0_lvgl_widget_get_native_obj((rm690b0_lvgl_widget_obj_t *)self);
-    
+
     // Check if selection is actually changing
     mp_int_t current_index = common_hal_rm690b0_lvgl_dropdown_get_selected(self);
     if (current_index == index) {
         return;  // No change needed
     }
-    
+
     lv_dropdown_set_selected(dropdown, (uint16_t)index);
-    
+
     // Manually trigger the callback when set programmatically
     if (self->on_change_handler != mp_const_none) {
         mp_call_function_1(self->on_change_handler, MP_OBJ_FROM_PTR(self));

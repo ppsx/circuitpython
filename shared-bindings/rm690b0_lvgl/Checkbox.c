@@ -41,15 +41,15 @@ static mp_obj_t rm690b0_lvgl_checkbox_make_new(const mp_obj_type_t *type, size_t
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     rm690b0_lvgl_checkbox_obj_t *self = mp_obj_malloc(rm690b0_lvgl_checkbox_obj_t, &rm690b0_lvgl_checkbox_type);
-    
+
     // Initialize callback to None
     self->on_change_handler = mp_const_none;
-    
+
     const char *text = "Checkbox";
     if (args[ARG_text].u_obj != MP_OBJ_NULL) {
         text = mp_obj_str_get_str(args[ARG_text].u_obj);
     }
-    
+
     common_hal_rm690b0_lvgl_checkbox_construct(self, text);
     return MP_OBJ_FROM_PTR(self);
 }
@@ -139,19 +139,19 @@ static const mp_rom_map_elem_t rm690b0_lvgl_checkbox_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_text_font), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_text_font_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_opa), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_opa_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_parent), MP_ROM_PTR(&rm690b0_lvgl_widget_set_parent_obj) },
     { MP_ROM_QSTR(MP_QSTR_delete), MP_ROM_PTR(&rm690b0_lvgl_widget_delete_obj) },
-    
+
     // Checkbox-specific properties
     { MP_ROM_QSTR(MP_QSTR_checked), MP_ROM_PTR(&rm690b0_lvgl_checkbox_checked_obj) },
     { MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&rm690b0_lvgl_checkbox_text_obj) },
     { MP_ROM_QSTR(MP_QSTR_on_change), MP_ROM_PTR(&rm690b0_lvgl_checkbox_on_change_obj) },
-    
+
     // Checkbox-specific methods
     { MP_ROM_QSTR(MP_QSTR_toggle), MP_ROM_PTR(&rm690b0_lvgl_checkbox_toggle_obj) },
 };

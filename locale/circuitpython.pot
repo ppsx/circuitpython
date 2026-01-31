@@ -610,6 +610,10 @@ msgstr ""
 msgid "Async SPI transfer in progress on this bus, keep awaiting."
 msgstr ""
 
+#: shared-bindings/rm690b0_lvgl/Line.c
+msgid "At least two points required"
+msgstr ""
+
 #: shared-module/memorymonitor/AllocationAlarm.c
 #, c-format
 msgid "Attempt to allocate %d blocks"
@@ -765,6 +769,18 @@ msgstr ""
 msgid "Call super().__init__() before accessing native object."
 msgstr ""
 
+#: shared-bindings/rm690b0_lvgl/Arc.c shared-bindings/rm690b0_lvgl/Button.c
+#: shared-bindings/rm690b0_lvgl/Buttonmatrix.c
+#: shared-bindings/rm690b0_lvgl/Checkbox.c
+#: shared-bindings/rm690b0_lvgl/Dropdown.c
+#: shared-bindings/rm690b0_lvgl/Keyboard.c
+#: shared-bindings/rm690b0_lvgl/Msgbox.c shared-bindings/rm690b0_lvgl/Slider.c
+#: shared-bindings/rm690b0_lvgl/Spinbox.c shared-bindings/rm690b0_lvgl/Switch.c
+#: shared-bindings/rm690b0_lvgl/Tabview.c
+#: shared-bindings/rm690b0_lvgl/Textarea.c
+msgid "Callback must be callable or None"
+msgstr ""
+
 #: ports/cxd56/common-hal/camera/Camera.c
 msgid "Camera init"
 msgstr ""
@@ -861,6 +877,10 @@ msgstr ""
 
 #: ports/espressif/common-hal/alarm/pin/PinAlarm.c
 msgid "Cannot wake on pin edge. Only level."
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Canvas.c
+msgid "Canvas buffer alloc failed"
 msgstr ""
 
 #: shared-bindings/_bleio/CharacteristicBuffer.c
@@ -978,6 +998,26 @@ msgstr ""
 msgid "Display initialization failed: Out of memory"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "Display must be initialized before touch. Call init_display() first."
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid ""
+"Display must be initialized first. Call init_display() before "
+"init_rendering()."
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid ""
+"Display must be initialized first. Call init_display() before "
+"set_theme_color()."
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "Display must be initialized. Call init_display() first."
+msgstr ""
+
 #: shared-bindings/busdisplay/BusDisplay.c
 #: shared-bindings/framebufferio/FramebufferDisplay.c
 msgid "Display must have a 16 bit colorspace."
@@ -1024,6 +1064,19 @@ msgstr ""
 msgid "Error in safemode.py."
 msgstr ""
 
+#: shared-bindings/rm690b0_lvgl/RM690B0_LVGL.c
+#: shared-bindings/rm690b0_lvgl/Widget.c
+msgid "Expected a %q"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Widget.c
+msgid "Expected a Font object"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Keyboard.c
+msgid "Expected a Textarea or None"
+msgstr ""
+
 #: shared-bindings/alarm/__init__.c
 msgid "Expected a kind of %q"
 msgstr ""
@@ -1063,12 +1116,32 @@ msgstr ""
 msgid "Failed to allocate %q buffer"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "Failed to allocate DMA buffers"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "Failed to allocate LVGL buffer 1"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "Failed to allocate LVGL buffer 2"
+msgstr ""
+
 #: ports/espressif/common-hal/wifi/__init__.c
 msgid "Failed to allocate Wifi memory"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/Chart.c
+msgid "Failed to allocate chart series"
+msgstr ""
+
 #: ports/espressif/common-hal/rm690b0/RM690B0.c
 msgid "Failed to allocate memory for circle"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Msgbox.c
+msgid "Failed to allocate memory for msgbox buttons"
 msgstr ""
 
 #: ports/espressif/common-hal/wifi/ScannedNetworks.c
@@ -1097,6 +1170,106 @@ msgstr ""
 msgid "Failed to create DMA semaphore"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/Arc.c
+msgid "Failed to create LVGL arc"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Bar.c
+msgid "Failed to create LVGL bar"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Button.c
+msgid "Failed to create LVGL button"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Button.c
+msgid "Failed to create LVGL button label"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Buttonmatrix.c
+msgid "Failed to create LVGL buttonmatrix"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Canvas.c
+msgid "Failed to create LVGL canvas"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Chart.c
+msgid "Failed to create LVGL chart"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Checkbox.c
+msgid "Failed to create LVGL checkbox"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Container.c
+msgid "Failed to create LVGL container"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Dropdown.c
+msgid "Failed to create LVGL dropdown"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Keyboard.c
+msgid "Failed to create LVGL keyboard"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Label.c
+msgid "Failed to create LVGL label"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Line.c
+msgid "Failed to create LVGL line"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/List.c
+msgid "Failed to create LVGL list"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Scale.c
+msgid "Failed to create LVGL meter"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Msgbox.c
+msgid "Failed to create LVGL msgbox"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Roller.c
+msgid "Failed to create LVGL roller"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Slider.c
+msgid "Failed to create LVGL slider"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Spinbox.c
+msgid "Failed to create LVGL spinbox"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Spinner.c
+msgid "Failed to create LVGL spinner"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Switch.c
+msgid "Failed to create LVGL switch"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Table.c
+msgid "Failed to create LVGL table"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Tabview.c
+msgid "Failed to create LVGL tabview"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Textarea.c
+msgid "Failed to create LVGL textarea"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Widget.c
+msgid "Failed to create LVGL widget"
+msgstr ""
+
 #: ports/espressif/common-hal/rm690b0/RM690B0.c
 msgid "Failed to create RM690B0 panel"
 msgstr ""
@@ -1117,8 +1290,32 @@ msgstr ""
 msgid "Failed to create continuous channels: not found"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "Failed to create dummy image"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Scale.c
+msgid "Failed to create indicator"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/List.c
+msgid "Failed to create list button"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/List.c
+msgid "Failed to create list text"
+msgstr ""
+
 #: ports/espressif/common-hal/rm690b0/RM690B0.c
 msgid "Failed to create panel I/O"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Scale.c
+msgid "Failed to create scale"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Tabview.c
+msgid "Failed to create tab"
 msgstr ""
 
 #: ports/espressif/common-hal/rm690b0/RM690B0.c
@@ -1168,6 +1365,10 @@ msgstr ""
 #: ports/espressif/common-hal/rm690b0/RM690B0.c
 #, c-format
 msgid "Failed to latch brightness: %s"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Font.c
+msgid "Failed to load font"
 msgstr ""
 
 #: shared-module/audiomp3/MP3Decoder.c
@@ -1269,6 +1470,10 @@ msgstr ""
 
 #: ports/espressif/common-hal/espidf/__init__.c
 msgid "Generic Failure"
+msgstr ""
+
+#: shared-bindings/rm690b0_lvgl/Roller.c
+msgid "Getting options not supported by LVGL API"
 msgstr ""
 
 #: shared-bindings/framebufferio/FramebufferDisplay.c
@@ -1518,6 +1723,10 @@ msgstr ""
 msgid "Invalid multicast MAC address"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/Line.c
+msgid "Invalid point list"
+msgstr ""
+
 #: ports/espressif/common-hal/espidf/__init__.c
 msgid "Invalid size"
 msgstr ""
@@ -1663,6 +1872,10 @@ msgstr ""
 
 #: shared-bindings/socketpool/SocketPool.c
 msgid "Name or service not known"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Canvas.c
+msgid "Need at least two points"
 msgstr ""
 
 #: shared-bindings/displayio/TileGrid.c
@@ -2018,6 +2231,10 @@ msgstr ""
 msgid "Plus any modules on the filesystem\n"
 msgstr ""
 
+#: shared-bindings/rm690b0_lvgl/Line.c
+msgid "Points must be (x, y)"
+msgstr ""
+
 #: shared-module/vectorio/Polygon.c
 msgid "Polygon needs at least 3 points"
 msgstr ""
@@ -2069,6 +2286,10 @@ msgstr ""
 
 #: shared-module/displayio/OnDiskBitmap.c
 msgid "RLE-compressed BMP not supported"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/RM690B0_LVGL.c
+msgid "RM690B0 display not initialized. Initialize rm690b0.RM690B0 first."
 msgstr ""
 
 #: ports/stm/common-hal/os/__init__.c
@@ -2233,6 +2454,10 @@ msgstr ""
 
 #: shared-bindings/is31fl3741/FrameBuffer.c
 msgid "Scale dimensions must divide by 3"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Scale.c
+msgid "Scale not initialized"
 msgstr ""
 
 #: ports/espressif/common-hal/_bleio/Adapter.c
@@ -2586,6 +2811,10 @@ msgstr ""
 msgid "Unsupported JPEG (may be progressive)"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/Canvas.c
+msgid "Unsupported color_format"
+msgstr ""
+
 #: shared-bindings/bitmaptools/__init__.c
 msgid "Unsupported colorspace"
 msgstr ""
@@ -2767,6 +2996,10 @@ msgstr ""
 
 #: ports/espressif/common-hal/audioio/AudioOut.c
 msgid "already playing"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Scale.c
+msgid "angle_range must be 1-360"
 msgstr ""
 
 #: py/compile.c
@@ -2962,6 +3195,10 @@ msgstr ""
 
 #: ports/atmel-samd/bindings/samd/Clock.c
 msgid "calibration is read only"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Widget.c
+msgid "callback must be callable or None"
 msgstr ""
 
 #: shared-module/vectorio/Circle.c shared-module/vectorio/Polygon.c
@@ -3403,6 +3640,10 @@ msgstr ""
 msgid "file write is not available"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/Font.c
+msgid "file_or_data must be a string path or a bytes-like object"
+msgstr ""
+
 #: ports/espressif/common-hal/rm690b0/RM690B0.c
 #, c-format
 msgid "fill_color failed: %s"
@@ -3583,6 +3824,10 @@ msgstr ""
 
 #: extmod/ulab/code/ndarray.c extmod/ulab/code/numpy/transform.c
 msgid "index is out of bounds"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Chart.c
+msgid "index must be >= 0"
 msgstr ""
 
 #: shared-bindings/_pixelmap/PixelMap.c
@@ -3848,6 +4093,11 @@ msgstr ""
 #: ports/nordic/common-hal/_bleio/Descriptor.c
 #, c-format
 msgid "max_length must be 0-%d when fixed_length is %s"
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Chart.c
+#: ports/espressif/common-hal/rm690b0_lvgl/Scale.c
+msgid "max_value must be >= min_value"
 msgstr ""
 
 #: extmod/ulab/code/ndarray.c extmod/ulab/code/numpy/random/random.c
@@ -4283,6 +4533,14 @@ msgstr ""
 msgid "parameters must be registers in sequence r0 to r3"
 msgstr ""
 
+#: ports/espressif/common-hal/rm690b0_lvgl/Chart.c
+msgid "point_count must be > 0"
+msgstr ""
+
+#: shared-bindings/rm690b0_lvgl/Canvas.c
+msgid "points must be (x, y) pairs"
+msgstr ""
+
 #: extmod/vfs_posix_file.c
 msgid "poll on file not available on win32"
 msgstr ""
@@ -4339,6 +4597,10 @@ msgstr ""
 #: py/obj.c
 #, c-format
 msgid "requested length %d but object has length %d"
+msgstr ""
+
+#: shared-bindings/rm690b0_lvgl/Canvas.c
+msgid "require at least 2 points"
 msgstr ""
 
 #: extmod/ulab/code/ndarray_operators.c
@@ -4723,6 +4985,10 @@ msgstr ""
 msgid "value out of range of target"
 msgstr ""
 
+#: shared-bindings/rm690b0_lvgl/Chart.c
+msgid "values must not be empty"
+msgstr ""
+
 #: extmod/moddeflate.c
 msgid "wbits"
 msgstr ""
@@ -4735,6 +5001,10 @@ msgstr ""
 
 #: shared-bindings/bitmapfilter/__init__.c
 msgid "weights must be an object of type %q, %q, %q, or %q, not %q "
+msgstr ""
+
+#: ports/espressif/common-hal/rm690b0_lvgl/Canvas.c
+msgid "width and height must be > 0"
 msgstr ""
 
 #: shared-bindings/is31fl3741/FrameBuffer.c

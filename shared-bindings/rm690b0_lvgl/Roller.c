@@ -146,7 +146,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_roller_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_selected_str), MP_ROM_PTR(&rm690b0_lvgl_roller_selected_str_obj) },
     { MP_ROM_QSTR(MP_QSTR_visible_row_count), MP_ROM_PTR(&rm690b0_lvgl_roller_visible_row_count_obj) },
     { MP_ROM_QSTR(MP_QSTR_on_change), MP_ROM_PTR(&rm690b0_lvgl_roller_on_change_obj) },
-    
+
     // Inherited from Widget
     { MP_ROM_QSTR(MP_QSTR_x), MP_ROM_PTR(&rm690b0_lvgl_widget_x_obj) },
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },

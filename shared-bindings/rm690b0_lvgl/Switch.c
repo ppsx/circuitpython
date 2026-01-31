@@ -25,19 +25,19 @@ extern const mp_obj_fun_builtin_fixed_t rm690b0_lvgl_widget_delete_obj;
 //|
 //|     def __init__(self) -> None:
 //|         """Create a new Switch widget.
-//|         
+//|
 //|         A switch is similar to a checkbox but styled as an on/off toggle.
 //|         """
 //|         ...
 //|
 static mp_obj_t rm690b0_lvgl_switch_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
-    
+
     rm690b0_lvgl_switch_obj_t *self = mp_obj_malloc(rm690b0_lvgl_switch_obj_t, &rm690b0_lvgl_switch_type);
-    
+
     // Initialize callback to None
     self->on_change_handler = mp_const_none;
-    
+
     common_hal_rm690b0_lvgl_switch_construct(self);
     return MP_OBJ_FROM_PTR(self);
 }
@@ -105,17 +105,17 @@ static const mp_rom_map_elem_t rm690b0_lvgl_switch_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_opa), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_opa_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_parent), MP_ROM_PTR(&rm690b0_lvgl_widget_set_parent_obj) },
     { MP_ROM_QSTR(MP_QSTR_delete), MP_ROM_PTR(&rm690b0_lvgl_widget_delete_obj) },
-    
+
     // Switch-specific properties
     { MP_ROM_QSTR(MP_QSTR_checked), MP_ROM_PTR(&rm690b0_lvgl_switch_checked_obj) },
     { MP_ROM_QSTR(MP_QSTR_on_change), MP_ROM_PTR(&rm690b0_lvgl_switch_on_change_obj) },
-    
+
     // Switch-specific methods
     { MP_ROM_QSTR(MP_QSTR_toggle), MP_ROM_PTR(&rm690b0_lvgl_switch_toggle_obj) },
 };

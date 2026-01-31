@@ -34,10 +34,10 @@
 //|
 static mp_obj_t rm690b0_lvgl_rm690b0_lvgl_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
-    
+
     rm690b0_lvgl_rm690b0_lvgl_obj_t *self = mp_obj_malloc(rm690b0_lvgl_rm690b0_lvgl_obj_t, &rm690b0_lvgl_rm690b0_lvgl_type);
     common_hal_rm690b0_lvgl_rm690b0_lvgl_construct(self);
-    
+
     return MP_OBJ_FROM_PTR(self);
 }
 
@@ -156,11 +156,11 @@ static MP_DEFINE_CONST_FUN_OBJ_KW(rm690b0_lvgl_init_touch_obj, 1, rm690b0_lvgl_i
 //|         Example::
 //|
 //|             import time
-//|             
+//|
 //|             lvgl = rm690b0_lvgl.RM690B0_LVGL()
 //|             lvgl.init_display()
 //|             lvgl.init_touch()
-//|             
+//|
 //|             while True:
 //|                 lvgl.task_handler()
 //|                 time.sleep(0.01)
@@ -193,10 +193,10 @@ static MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_lvgl_task_handler_obj, rm690b0_lvgl_tas
 //|
 //|             lvgl = rm690b0_lvgl.RM690B0_LVGL()
 //|             lvgl.init_display()
-//|             
+//|
 //|             # CRITICAL: Initialize rendering before touch
 //|             lvgl.init_rendering()
-//|             
+//|
 //|             # Now safe to initialize touch
 //|             i2c = busio.I2C(board.SCL, board.SDA)
 //|             lvgl.init_touch(i2c)
@@ -337,7 +337,7 @@ static const mp_rom_map_elem_t rm690b0_lvgl_rm690b0_lvgl_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_scroll_screen), MP_ROM_PTR(&rm690b0_lvgl_scroll_screen_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_scroll_y), MP_ROM_PTR(&rm690b0_lvgl_get_scroll_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_theme_color), MP_ROM_PTR(&rm690b0_lvgl_set_theme_color_obj) },
-    
+
     // Properties
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_height_obj) },

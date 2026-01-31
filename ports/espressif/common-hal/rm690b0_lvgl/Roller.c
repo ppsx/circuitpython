@@ -30,13 +30,13 @@ void common_hal_rm690b0_lvgl_roller_construct(rm690b0_lvgl_roller_obj_t *self) {
     if (roller == NULL) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL roller"));
     }
-    
+
     // Set default properties
     self->base.native_obj = roller;
     self->base.callback = mp_const_none;
 
     lv_obj_add_event_cb(roller, roller_event_handler, LV_EVENT_VALUE_CHANGED, self);
-    
+
     // Default options (example)
     lv_roller_set_options(roller, "Option 1\nOption 2\nOption 3", LV_ROLLER_MODE_NORMAL);
 }
@@ -69,14 +69,14 @@ void common_hal_rm690b0_lvgl_roller_set_visible_row_count(rm690b0_lvgl_roller_ob
 
 const char *common_hal_rm690b0_lvgl_roller_get_selected_str(rm690b0_lvgl_roller_obj_t *self) {
     lv_obj_t *roller = common_hal_rm690b0_lvgl_widget_get_native_obj((rm690b0_lvgl_widget_obj_t *)self);
-    
+
     // We need a static buffer or GC-allocated buffer to return string
     // LVGL has a function to copy selected string to a buffer
     // Let's use a static buffer for now, similar to how other string getters might work
     // Or better: allocate a small buffer on stack, but return value needs to persist?
     // Actually, common_hal calls are used by shared-bindings which creates a Python string object immediately
     // So we can use a static buffer that is valid until the Python string is created.
-    
+
     static char buf[256]; // Max option length
     lv_roller_get_selected_str(roller, buf, sizeof(buf));
     return buf;

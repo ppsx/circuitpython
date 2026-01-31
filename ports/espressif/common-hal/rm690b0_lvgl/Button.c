@@ -27,7 +27,7 @@ void common_hal_rm690b0_lvgl_button_construct(rm690b0_lvgl_button_obj_t *self, c
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL button"));
         return;
     }
-    
+
     lv_obj_t *label = lv_label_create(btn);
     if (label == NULL) {
         lv_obj_del(btn);
@@ -36,9 +36,9 @@ void common_hal_rm690b0_lvgl_button_construct(rm690b0_lvgl_button_obj_t *self, c
     }
     lv_label_set_text(label, text);
     lv_obj_center(label);
-    
+
     lv_obj_add_event_cb(btn, button_event_handler, LV_EVENT_ALL, self);
-    
+
     self->base.native_obj = btn;
     self->base.callback = mp_const_none;
 }
@@ -52,7 +52,7 @@ void common_hal_rm690b0_lvgl_button_set_text(rm690b0_lvgl_button_obj_t *self, co
     }
 }
 
-const char* common_hal_rm690b0_lvgl_button_get_text(rm690b0_lvgl_button_obj_t *self) {
+const char *common_hal_rm690b0_lvgl_button_get_text(rm690b0_lvgl_button_obj_t *self) {
     lv_obj_t *btn = (lv_obj_t *)self->base.native_obj;
     lv_obj_t *label = lv_obj_get_child(btn, 0);
     if (label) {

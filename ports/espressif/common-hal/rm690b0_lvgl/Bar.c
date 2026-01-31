@@ -17,15 +17,15 @@ void common_hal_rm690b0_lvgl_bar_construct(rm690b0_lvgl_bar_obj_t *self, mp_int_
     if (bar == NULL) {
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create LVGL bar"));
     }
-    
+
     self->native_obj = bar;
-    
+
     // Set range
     lv_bar_set_range(bar, (int32_t)min_value, (int32_t)max_value);
-    
+
     // Set initial value to minimum
     lv_bar_set_value(bar, (int32_t)min_value, LV_ANIM_OFF);
-    
+
     // Set default size
     lv_obj_set_width(bar, 200);
     lv_obj_set_height(bar, 20);

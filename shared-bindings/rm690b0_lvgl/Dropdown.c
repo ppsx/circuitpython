@@ -41,15 +41,15 @@ static mp_obj_t rm690b0_lvgl_dropdown_make_new(const mp_obj_type_t *type, size_t
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     rm690b0_lvgl_dropdown_obj_t *self = mp_obj_malloc(rm690b0_lvgl_dropdown_obj_t, &rm690b0_lvgl_dropdown_type);
-    
+
     // Initialize callback to None
     self->on_change_handler = mp_const_none;
-    
+
     const char *options = "Option 1\nOption 2\nOption 3";
     if (args[ARG_options].u_obj != MP_OBJ_NULL) {
         options = mp_obj_str_get_str(args[ARG_options].u_obj);
     }
-    
+
     common_hal_rm690b0_lvgl_dropdown_construct(self, options);
     return MP_OBJ_FROM_PTR(self);
 }
@@ -162,19 +162,19 @@ static const mp_rom_map_elem_t rm690b0_lvgl_dropdown_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_y), MP_ROM_PTR(&rm690b0_lvgl_widget_y_obj) },
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_lvgl_widget_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_lvgl_widget_height_obj) },
-    
+
     // Inherited Widget methods
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_color), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_color_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_text_font), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_text_font_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_style_bg_opa), MP_ROM_PTR(&rm690b0_lvgl_widget_set_style_bg_opa_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_parent), MP_ROM_PTR(&rm690b0_lvgl_widget_set_parent_obj) },
     { MP_ROM_QSTR(MP_QSTR_delete), MP_ROM_PTR(&rm690b0_lvgl_widget_delete_obj) },
-    
+
     // Dropdown-specific properties
     { MP_ROM_QSTR(MP_QSTR_selected), MP_ROM_PTR(&rm690b0_lvgl_dropdown_selected_obj) },
     { MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&rm690b0_lvgl_dropdown_text_obj) },
     { MP_ROM_QSTR(MP_QSTR_on_change), MP_ROM_PTR(&rm690b0_lvgl_dropdown_on_change_obj) },
-    
+
     // Dropdown-specific methods
     { MP_ROM_QSTR(MP_QSTR_set_options), MP_ROM_PTR(&rm690b0_lvgl_dropdown_set_options_obj) },
     { MP_ROM_QSTR(MP_QSTR_clear_options), MP_ROM_PTR(&rm690b0_lvgl_dropdown_clear_options_obj) },
@@ -189,4 +189,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_dropdown_make_new,
     locals_dict, &rm690b0_lvgl_dropdown_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

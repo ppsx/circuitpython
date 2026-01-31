@@ -196,4 +196,4 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, rm690b0_lvgl_line_make_new,
     locals_dict, &rm690b0_lvgl_line_locals_dict,
     parent, &rm690b0_lvgl_widget_type
-);
+    );

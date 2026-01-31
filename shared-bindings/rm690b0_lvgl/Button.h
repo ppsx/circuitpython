@@ -18,4 +18,4 @@ extern const mp_obj_type_t rm690b0_lvgl_button_type;
 
 void common_hal_rm690b0_lvgl_button_construct(rm690b0_lvgl_button_obj_t *self, const char *text);
 void common_hal_rm690b0_lvgl_button_set_text(rm690b0_lvgl_button_obj_t *self, const char *text);
-const char* common_hal_rm690b0_lvgl_button_get_text(rm690b0_lvgl_button_obj_t *self);
+const char *common_hal_rm690b0_lvgl_button_get_text(rm690b0_lvgl_button_obj_t *self);

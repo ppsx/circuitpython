@@ -44,12 +44,12 @@
 //| Example::
 //|
 //|     import rm690b0_lvgl
-//|     
+//|
 //|     # Initialize LVGL with the RM690B0 display
 //|     lvgl = rm690b0_lvgl.RM690B0_LVGL()
 //|     lvgl.init_display()
 //|     lvgl.init_touch()
-//|     
+//|
 //|     # LVGL is now ready to use
 //|     # Use standard LVGL API through lv module
 //| """
@@ -103,11 +103,11 @@
 //|
 //|         import rm690b0_lvgl
 //|         import time
-//|         
+//|
 //|         lvgl = rm690b0_lvgl.RM690B0_LVGL()
 //|         lvgl.init_display()
 //|         lvgl.init_touch()
-//|         
+//|
 //|         while True:
 //|             lvgl.task_handler()
 //|             time.sleep(0.01)

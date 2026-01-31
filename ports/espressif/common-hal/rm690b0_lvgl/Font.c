@@ -11,8 +11,8 @@
 #include "py/stream.h"
 #include "shared-bindings/rm690b0_lvgl/Font.h"
 #include "lvgl.h"
-// Include the specific header for Tiny TTF. 
-// Note: Depending on build system include paths, this might need adjustment, 
+// Include the specific header for Tiny TTF.
+// Note: Depending on build system include paths, this might need adjustment,
 // but based on component structure this path is relative to LVGL root or component root.
 #include "src/extra/libs/tiny_ttf/lv_tiny_ttf.h"
 
