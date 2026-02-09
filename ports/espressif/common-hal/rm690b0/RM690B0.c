@@ -3449,7 +3449,7 @@ mp_float_t common_hal_rm690b0_rm690b0_get_brightness(const rm690b0_rm690b0_obj_t
     return (mp_float_t)raw / 255.0f;
 }
 
-void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_obj_t bitmap_data, bool dest_is_swapped) {
+void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_obj_t bitmap_data, bool dest_is_swapped, mp_int_t transparent_color, mp_int_t src_x1, mp_int_t src_y1, mp_int_t src_x2, mp_int_t src_y2) {
     CHECK_INITIALIZED();
 
     if (width <= 0 || height <= 0) {
@@ -3458,6 +3458,24 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
 
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(bitmap_data, &bufinfo, MP_BUFFER_READ);
+
+    // Handle default src_x2/src_y2 values
+    if (src_x2 < 0) {
+        src_x2 = width;
+    }
+    if (src_y2 < 0) {
+        src_y2 = height;
+    }
+
+    // Validate source region
+    if (src_x1 < 0 || src_y1 < 0 || src_x2 > width || src_y2 > height || src_x1 >= src_x2 || src_y1 >= src_y2) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid source region (must be: 0 <= x1 < x2 <= width, 0 <= y1 < y2 <= height)"));
+        return;
+    }
+
+    // Calculate actual dimensions of the region we're copying
+    mp_int_t src_region_w = src_x2 - src_x1;
+    mp_int_t src_region_h = src_y2 - src_y1;
 
     size_t src_width = (size_t)width;
     size_t src_height = (size_t)height;
@@ -3474,15 +3492,17 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
         return;
     }
 
+    // Logical coordinates are based on the source region dimensions
     mp_int_t logical_x = x;
     mp_int_t logical_y = y;
-    mp_int_t logical_w = width;
-    mp_int_t logical_h = height;
+    mp_int_t logical_w = src_region_w;
+    mp_int_t logical_h = src_region_h;
 
     if (!clip_logical_rect(self, &logical_x, &logical_y, &logical_w, &logical_h)) {
         return;
     }
 
+    // Calculate crop offsets relative to the source region
     mp_int_t crop_left = logical_x - x;
     mp_int_t crop_top = logical_y - y;
     if (crop_left < 0) {
@@ -3513,26 +3533,41 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
 
     const uint16_t *src_base = (const uint16_t *)bufinfo.buf;
     size_t src_stride = src_width;
-    const uint16_t *src_pixels = src_base + (size_t)crop_top * src_stride + (size_t)crop_left;
+    // Offset by src_x1, src_y1 to start at the source region, then add crop offsets
+    const uint16_t *src_pixels = src_base + (size_t)(src_y1 + crop_top) * src_stride + (size_t)(src_x1 + crop_left);
 
     uint16_t *framebuffer = impl->framebuffer;
     size_t fb_stride = RM690B0_PANEL_WIDTH;
+
+    // Determine if we have transparency enabled
+    bool has_transparency = (transparent_color >= 0 && transparent_color <= 0xFFFF);
+    uint16_t transp = (uint16_t)transparent_color;
 
     // If source is already swapped (BE) and we need BE for display, we skip the swap.
     // If source is normal (LE) and we need BE (display), we swap.
     // Standard blit_buffer assumes LE input and swaps to BE.
     // IF dest_is_swapped is TRUE, it means the SOURCE is already in destination format (BE).
-    
+
     switch (self->rotation) {
         case 0:
             for (mp_int_t row = 0; row < logical_h; row++) {
                 const uint16_t *src_row = src_pixels + (size_t)row * src_stride;
                 uint16_t *dst_row = framebuffer + (size_t)(phys_y + row) * fb_stride + phys_x;
-                if (dest_is_swapped) {
+
+                // Fast path: no transparency and dest_is_swapped (can use memcpy)
+                if (!has_transparency && dest_is_swapped) {
                     memcpy(dst_row, src_row, logical_w * sizeof(uint16_t));
                 } else {
+                    // Slow path: per-pixel copy with optional transparency check
                     for (mp_int_t col = 0; col < logical_w; col++) {
-                        dst_row[col] = RGB565_SWAP_GB(src_row[col]);
+                        uint16_t val = src_row[col];
+
+                        // Skip transparent pixels
+                        if (has_transparency && val == transp) {
+                            continue;
+                        }
+
+                        dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
                     }
                 }
             }
@@ -3543,6 +3578,12 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
                 uint16_t *dst_row = framebuffer + (size_t)(phys_y + row) * fb_stride + phys_x;
                 for (mp_int_t col = 0; col < logical_w; col++) {
                     uint16_t val = src_row[logical_w - 1 - col];
+
+                    // Skip transparent pixels
+                    if (has_transparency && val == transp) {
+                        continue;
+                    }
+
                     dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
                 }
             }
@@ -3557,6 +3598,12 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
                     mp_int_t src_col_idx = row;
                     const uint16_t *src_row = src_pixels + (size_t)src_row_idx * src_stride;
                     uint16_t val = src_row[src_col_idx];
+
+                    // Skip transparent pixels
+                    if (has_transparency && val == transp) {
+                        continue;
+                    }
+
                     dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
                 }
             }
@@ -3572,6 +3619,12 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
                     mp_int_t src_col_idx = logical_w - 1 - row;
                     const uint16_t *src_row = src_pixels + (size_t)src_row_idx * src_stride;
                     uint16_t val = src_row[src_col_idx];
+
+                    // Skip transparent pixels
+                    if (has_transparency && val == transp) {
+                        continue;
+                    }
+
                     dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
                 }
             }

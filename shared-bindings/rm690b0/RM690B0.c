@@ -349,7 +349,8 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(rm690b0_rm690b0_convert_bmp_obj, 3, 3, rm690
 
 
 static mp_obj_t rm690b0_rm690b0_blit_buffer(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
-    enum { ARG_x, ARG_y, ARG_width, ARG_height, ARG_bitmap_data, ARG_dest_is_swapped };
+    enum { ARG_x, ARG_y, ARG_width, ARG_height, ARG_bitmap_data, ARG_dest_is_swapped,
+           ARG_transparent_color, ARG_src_x1, ARG_src_y1, ARG_src_x2, ARG_src_y2 };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_x, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 0} },
         { MP_QSTR_y, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 0} },
@@ -357,6 +358,11 @@ static mp_obj_t rm690b0_rm690b0_blit_buffer(size_t n_args, const mp_obj_t *pos_a
         { MP_QSTR_height, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 0} },
         { MP_QSTR_bitmap_data, MP_ARG_REQUIRED | MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
         { MP_QSTR_dest_is_swapped, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = false} },
+        { MP_QSTR_transparent_color, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -1} },
+        { MP_QSTR_src_x1, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_src_y1, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_src_x2, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -1} },
+        { MP_QSTR_src_y2, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -1} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
@@ -369,7 +375,12 @@ static mp_obj_t rm690b0_rm690b0_blit_buffer(size_t n_args, const mp_obj_t *pos_a
         args[ARG_width].u_int,
         args[ARG_height].u_int,
         args[ARG_bitmap_data].u_obj,
-        args[ARG_dest_is_swapped].u_bool
+        args[ARG_dest_is_swapped].u_bool,
+        args[ARG_transparent_color].u_int,
+        args[ARG_src_x1].u_int,
+        args[ARG_src_y1].u_int,
+        args[ARG_src_x2].u_int,
+        args[ARG_src_y2].u_int
     );
     return mp_const_none;
 }
