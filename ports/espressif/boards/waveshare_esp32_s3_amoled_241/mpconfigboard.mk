@@ -43,9 +43,6 @@ CIRCUITPY_RM690B0 = 1
 # Enable ESP-NOW for peer-to-peer wireless communication
 CIRCUITPY_ESPNOW = 1
 
-# Disable camera support (not present on this board)
-CIRCUITPY_ESPCAMERA = 0
-
 # Enable I2C for touch, RTC, and IMU
 CIRCUITPY_BITBANGIO = 1
 CIRCUITPY_I2C = 1
@@ -72,8 +69,12 @@ CIRCUITPY_USB_MIDI = 1
 # Storage configuration
 CIRCUITPY_STORAGE = 1
 CIRCUITPY_NVM = 1
-CIRCUITPY_SDCARDIO = 1
-CIRCUITPY_SDCARDIO_ESPRESSIF = 1
+# Use existing sdioio instead of custom sdcardio
+# CIRCUITPY_SDCARDIO = 1  # REMOVED - using sdioio
+# CIRCUITPY_SDCARDIO_ESPRESSIF = 1  # REMOVED
+CIRCUITPY_SDCARDIO = 0
+CIRCUITPY_SDCARDIO_ESPRESSIF = 0
+CIRCUITPY_SDIOIO = 1
 
 # Enable touch support
 CIRCUITPY_TOUCHIO = 0

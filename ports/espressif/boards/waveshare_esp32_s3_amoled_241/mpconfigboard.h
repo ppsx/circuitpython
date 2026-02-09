@@ -35,13 +35,9 @@
 #define CIRCUITPY_RM690B0_USE_QSPI       (1)
 #define CIRCUITPY_RM690B0_PIXEL_CLOCK_HZ (80 * 1000 * 1000)
 
-// SPI bus for SD Card
-#define CIRCUITPY_BOARD_SPI         (1)
-#define CIRCUITPY_BOARD_SPI_PIN     {{.clock = &pin_GPIO4, .mosi = &pin_GPIO5, .miso = &pin_GPIO6}}
+// No default SPI bus — SD card uses SDIO, display uses QSPI.
+#define CIRCUITPY_BOARD_SPI         (0)
 
 // Default UART bus
 #define DEFAULT_UART_BUS_RX (&pin_GPIO44)
 #define DEFAULT_UART_BUS_TX (&pin_GPIO43)
-
-// Disable unnecessary modules to save space
-#define CIRCUITPY_ESP32_CAMERA (0)
