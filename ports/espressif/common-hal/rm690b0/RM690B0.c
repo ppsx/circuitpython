@@ -138,6 +138,12 @@ typedef struct {
     uint8_t ids[RM690B0_PANEL_IO_QUEUE_DEPTH];
 } rm690b0_dma_pending_list_t;
 
+#define RM690B0_MAX_DIRTY_RECTS  (8)
+
+typedef struct {
+    mp_int_t x, y, w, h;
+} rm690b0_dirty_rect_t;
+
 typedef struct rm690b0_impl {
     esp_lcd_panel_io_handle_t io_handle;
     esp_lcd_panel_handle_t panel_handle;
@@ -148,11 +154,10 @@ typedef struct rm690b0_impl {
     size_t framebuffer_pixels;
     uint16_t *framebuffer_front;
     bool double_buffered;
-    bool dirty_region_valid;
-    mp_int_t dirty_x;
-    mp_int_t dirty_y;
-    mp_int_t dirty_w;
-    mp_int_t dirty_h;
+    size_t dirty_count;
+    bool dirty_merged_valid;
+    mp_int_t dirty_merged_x, dirty_merged_y, dirty_merged_w, dirty_merged_h;
+    rm690b0_dirty_rect_t dirty_rects[RM690B0_MAX_DIRTY_RECTS];
     SemaphoreHandle_t transfer_done_sem;
     bool dma_buffer_in_use[2];
     bool dma_alloc_buffer_in_use;
@@ -1659,39 +1664,56 @@ static esp_err_t rm690b0_tx_param(const rm690b0_impl_t *impl, uint8_t cmd, const
 
 // Mark a region as dirty for next swap_buffers()
 static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h) {
-    if (!impl->double_buffered) {
-        // Single-buffer mode: no dirty tracking needed (flush happens immediately)
+    if (!impl->double_buffered || w <= 0 || h <= 0) {
         return;
     }
 
-    if (w <= 0 || h <= 0) {
-        return;
-    }
-
-    if (!impl->dirty_region_valid) {
-        // First dirty region
-        impl->dirty_x = x;
-        impl->dirty_y = y;
-        impl->dirty_w = w;
-        impl->dirty_h = h;
-        impl->dirty_region_valid = true;
+    // Update merged bounds (union of all dirty rects - used as fallback)
+    if (!impl->dirty_merged_valid) {
+        impl->dirty_merged_x = x;
+        impl->dirty_merged_y = y;
+        impl->dirty_merged_w = w;
+        impl->dirty_merged_h = h;
+        impl->dirty_merged_valid = true;
     } else {
-        // Expand to include new region
-        mp_int_t x1 = impl->dirty_x;
-        mp_int_t y1 = impl->dirty_y;
-        mp_int_t x2 = impl->dirty_x + impl->dirty_w;
-        mp_int_t y2 = impl->dirty_y + impl->dirty_h;
-
-        mp_int_t new_x1 = (x < x1) ? x : x1;
-        mp_int_t new_y1 = (y < y1) ? y : y1;
-        mp_int_t new_x2 = (x + w > x2) ? x + w : x2;
-        mp_int_t new_y2 = (y + h > y2) ? y + h : y2;
-
-        impl->dirty_x = new_x1;
-        impl->dirty_y = new_y1;
-        impl->dirty_w = new_x2 - new_x1;
-        impl->dirty_h = new_y2 - new_y1;
+        mp_int_t x2 = impl->dirty_merged_x + impl->dirty_merged_w;
+        mp_int_t y2 = impl->dirty_merged_y + impl->dirty_merged_h;
+        impl->dirty_merged_x = (x < impl->dirty_merged_x) ? x : impl->dirty_merged_x;
+        impl->dirty_merged_y = (y < impl->dirty_merged_y) ? y : impl->dirty_merged_y;
+        x2 = (x + w > x2) ? x + w : x2;
+        y2 = (y + h > y2) ? y + h : y2;
+        impl->dirty_merged_w = x2 - impl->dirty_merged_x;
+        impl->dirty_merged_h = y2 - impl->dirty_merged_y;
     }
+
+    // Try to add as new rect
+    if (impl->dirty_count < RM690B0_MAX_DIRTY_RECTS) {
+        impl->dirty_rects[impl->dirty_count++] = (rm690b0_dirty_rect_t){x, y, w, h};
+        return;
+    }
+
+    // Array full: merge with closest existing rect (center-to-center distance)
+    size_t merge_idx = 0;
+    mp_int_t min_dist = INT_MAX;
+    mp_int_t cx = x + w / 2;
+    mp_int_t cy = y + h / 2;
+    for (size_t i = 0; i < RM690B0_MAX_DIRTY_RECTS; i++) {
+        rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
+        mp_int_t dx = cx - (r->x + r->w / 2);
+        mp_int_t dy = cy - (r->y + r->h / 2);
+        mp_int_t dist = dx * dx + dy * dy;
+        if (dist < min_dist) {
+            min_dist = dist;
+            merge_idx = i;
+        }
+    }
+    rm690b0_dirty_rect_t *t = &impl->dirty_rects[merge_idx];
+    mp_int_t tx2 = t->x + t->w;
+    mp_int_t ty2 = t->y + t->h;
+    t->x = (x < t->x) ? x : t->x;
+    t->y = (y < t->y) ? y : t->y;
+    t->w = ((x + w > tx2) ? x + w : tx2) - t->x;
+    t->h = ((y + h > ty2) ? y + h : ty2) - t->y;
 }
 
 static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
@@ -1912,11 +1934,8 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     impl->circle_span_capacity = 0;
 
     // Initialize dirty region tracking
-    impl->dirty_region_valid = false;
-    impl->dirty_x = 0;
-    impl->dirty_y = 0;
-    impl->dirty_w = 0;
-    impl->dirty_h = 0;
+    impl->dirty_count = 0;
+    impl->dirty_merged_valid = false;
 
     // Create synchronization semaphore (counting, one slot per queued transfer)
     impl->transfer_done_sem = xSemaphoreCreateCounting(RM690B0_PANEL_IO_QUEUE_DEPTH, 0);
@@ -2431,7 +2450,8 @@ static void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t colo
     if (ret == ESP_OK && impl->framebuffer != NULL) {
         rm690b0_fill_rect_framebuffer(impl, 0, 0,
             RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, swapped);
-        impl->dirty_region_valid = false;
+        impl->dirty_count = 0;
+        impl->dirty_merged_valid = false;
     }
 
     heap_caps_free(dma_buffer);
@@ -3721,20 +3741,33 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     mp_int_t flush_w = self->width;
     mp_int_t flush_h = self->height;
 
-    if (impl->dirty_region_valid) {
-        // Only flush the dirty region for better performance
-        flush_x = impl->dirty_x;
-        flush_y = impl->dirty_y;
-        flush_w = impl->dirty_w;
-        flush_h = impl->dirty_h;
-        ESP_LOGI(TAG, "Flushing dirty region: %d,%d %dx%d", flush_x, flush_y, flush_w, flush_h);
+    if (impl->dirty_count > 0) {
+        // Calculate total area of individual rects vs merged rect
+        size_t individual_area = 0;
+        for (size_t i = 0; i < impl->dirty_count; i++) {
+            individual_area += (size_t)impl->dirty_rects[i].w * (size_t)impl->dirty_rects[i].h;
+        }
+        size_t merged_area = (size_t)impl->dirty_merged_w * (size_t)impl->dirty_merged_h;
+
+        if (merged_area > individual_area * 3 / 2) {
+            // Sparse update: flush individual rects (fewer pixels transferred)
+            for (size_t i = 0; i < impl->dirty_count; i++) {
+                rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
+                bool skip_delay = (i < impl->dirty_count - 1);
+                rm690b0_flush_region(self, r->x, r->y, r->w, r->h, skip_delay);
+            }
+        } else {
+            // Dense update: flush merged rect (fewer DMA ops)
+            flush_x = impl->dirty_merged_x;
+            flush_y = impl->dirty_merged_y;
+            flush_w = impl->dirty_merged_w;
+            flush_h = impl->dirty_merged_h;
+            rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h, copy);
+        }
     } else {
         ESP_LOGI(TAG, "Flushing full screen (no dirty region)");
+        rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h, copy);
     }
-
-    // Skip final delay if we're doing a copy - the memcpy will protect the SPI transfer
-    esp_err_t ret = rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h, copy);
-
 
     // Now swap the buffer pointers
     // After swap: framebuffer becomes the old front buffer (ready for new drawing)
@@ -3743,12 +3776,9 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     impl->framebuffer_front = impl->framebuffer;
     impl->framebuffer = temp;
 
-    // Reset dirty region after flush
-    impl->dirty_region_valid = false;
-    impl->dirty_x = 0;
-    impl->dirty_y = 0;
-    impl->dirty_w = 0;
-    impl->dirty_h = 0;
+    // Reset dirty tracking after flush
+    impl->dirty_count = 0;
+    impl->dirty_merged_valid = false;
 
     // Optionally copy front buffer to back buffer for incremental drawing
     // Standard double-buffering: back buffer inherits current display content
@@ -3760,11 +3790,6 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         ESP_LOGI(TAG, "Buffers swapped and back buffer updated");
     } else {
         ESP_LOGI(TAG, "Buffers swapped (no copy)");
-    }
-    if (ret != ESP_OK) {
-        mp_raise_msg_varg(&mp_type_RuntimeError,
-            MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
-            esp_err_to_name(ret), ret);
     }
 }
 
