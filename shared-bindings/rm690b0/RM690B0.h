@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include "py/obj.h"
 
+// Buffer mode constants
+#define RM690B0_BUFFER_SINGLE  0   // 1 framebuffer — dirty-tracked flush, saves 540 KB
+#define RM690B0_BUFFER_DOUBLE  1   // 2 framebuffers — tear-free animation (default)
+
 // Forward declaration for the rm690b0 object type
 typedef struct {
     mp_obj_base_t base;
@@ -16,6 +20,7 @@ typedef struct {
     mp_int_t rotation;
     uint8_t brightness_raw;
     mp_int_t font_id;  // Current font ID for text rendering
+    mp_int_t buffer_mode;  // RM690B0_BUFFER_SINGLE or RM690B0_BUFFER_DOUBLE
     // Port-specific implementation data will be added by common-hal
     void *impl;
 } rm690b0_rm690b0_obj_t;

@@ -1020,7 +1020,7 @@ static esp_err_t rm690b0_tx_param(const rm690b0_impl_t *impl, uint8_t cmd, const
 
 // Mark a region as dirty for next swap_buffers()
 static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h) {
-    if (!impl->double_buffered || w <= 0 || h <= 0) {
+    if (w <= 0 || h <= 0) {
         return;
     }
 
@@ -1274,6 +1274,7 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     self->rotation = 0;
     self->brightness_raw = 0xFF;
     self->font_id = RM690B0_FONT_8x8_MONO;  // Initialize with default font
+    self->buffer_mode = RM690B0_BUFFER_DOUBLE;  // default, overwritten by make_new
     self->impl = m_malloc(sizeof(rm690b0_impl_t));
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     impl->io_handle = NULL;
@@ -3059,8 +3060,9 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
-    // Lazy allocation: allocate front buffer on first call
-    if (!impl->double_buffered && impl->framebuffer_front == NULL) {
+    // Lazy allocation: allocate front buffer on first call (skip if BUFFER_SINGLE requested)
+    if (!impl->double_buffered && impl->framebuffer_front == NULL
+        && self->buffer_mode != RM690B0_BUFFER_SINGLE) {
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
         impl->framebuffer_front = heap_caps_malloc(framebuffer_pixels * sizeof(uint16_t),
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -3080,13 +3082,41 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     }
 
     if (!impl->double_buffered || impl->framebuffer_front == NULL) {
-        // Single-buffered mode - just flush current framebuffer
-        esp_err_t ret = rm690b0_flush_region(self, 0, 0, self->width, self->height, false);
-        if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError,
-                MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
-                esp_err_to_name(ret), ret);
+        // Single-buffer mode: use dirty tracking if available, else full-screen flush
+        if (impl->dirty_count > 0) {
+            size_t individual_area = 0;
+            for (size_t i = 0; i < impl->dirty_count; i++) {
+                individual_area += (size_t)impl->dirty_rects[i].w * (size_t)impl->dirty_rects[i].h;
+            }
+            size_t merged_area = (size_t)impl->dirty_merged_w * (size_t)impl->dirty_merged_h;
+
+            esp_err_t ret;
+            if (merged_area > individual_area * 3 / 2) {
+                for (size_t i = 0; i < impl->dirty_count; i++) {
+                    rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
+                    ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h,
+                                               i < impl->dirty_count - 1);
+                    (void)ret;
+                }
+            } else {
+                ret = rm690b0_flush_region(self, impl->dirty_merged_x, impl->dirty_merged_y,
+                                           impl->dirty_merged_w, impl->dirty_merged_h, false);
+                if (ret != ESP_OK) {
+                    mp_raise_msg_varg(&mp_type_RuntimeError,
+                        MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                        esp_err_to_name(ret), ret);
+                }
+            }
+        } else {
+            esp_err_t ret = rm690b0_flush_region(self, 0, 0, self->width, self->height, false);
+            if (ret != ESP_OK) {
+                mp_raise_msg_varg(&mp_type_RuntimeError,
+                    MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                    esp_err_to_name(ret), ret);
+            }
         }
+        impl->dirty_count = 0;
+        impl->dirty_merged_valid = false;
         return;
     }
 

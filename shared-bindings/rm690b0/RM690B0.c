@@ -22,22 +22,38 @@
 //|     blitting bitmaps) and a small built-in text API with several fixed fonts.
 //|     """
 //|
-//|     def __init__(self) -> None:
+//|     def __init__(self, *, buffer_mode: int = BUFFER_DOUBLE) -> None:
 //|         """Initialize the RM690B0 display driver
 //|
 //|         Initializes the panel and internal framebuffers. Call `init_display()`
 //|         before performing any drawing operations.
+//|
+//|         :param int buffer_mode: ``rm690b0.BUFFER_DOUBLE`` (default) allocates a second
+//|             540 KB framebuffer for tear-free animation. ``rm690b0.BUFFER_SINGLE`` uses
+//|             only one framebuffer and flushes dirty regions directly, saving 540 KB of
+//|             SPIRAM — recommended for static UI / dashboard applications.
 //|         """
 //|         ...
 //|
 
 static mp_obj_t rm690b0_rm690b0_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
-    // For now, accept no arguments
-    mp_arg_check_num(n_args, n_kw, 0, 0, false);
+    enum { ARG_buffer_mode };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_buffer_mode, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = RM690B0_BUFFER_DOUBLE} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all_kw_array(n_args, n_kw, all_args,
+        MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     rm690b0_rm690b0_obj_t *self = mp_obj_malloc(rm690b0_rm690b0_obj_t, &rm690b0_rm690b0_type);
 
     common_hal_rm690b0_rm690b0_construct(self);
+
+    mp_int_t mode = args[ARG_buffer_mode].u_int;
+    if (mode < RM690B0_BUFFER_SINGLE || mode > RM690B0_BUFFER_DOUBLE) {
+        mode = RM690B0_BUFFER_DOUBLE;
+    }
+    self->buffer_mode = mode;
 
     return MP_OBJ_FROM_PTR(self);
 }

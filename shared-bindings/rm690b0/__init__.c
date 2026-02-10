@@ -73,6 +73,10 @@ static const mp_rom_map_elem_t rm690b0_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_RED),          MP_ROM_INT(0xF800) },
     { MP_ROM_QSTR(MP_QSTR_ORANGE),       MP_ROM_INT(0xFC60) },
 
+    // Buffer mode constants
+    { MP_ROM_QSTR(MP_QSTR_BUFFER_SINGLE), MP_ROM_INT(RM690B0_BUFFER_SINGLE) },
+    { MP_ROM_QSTR(MP_QSTR_BUFFER_DOUBLE), MP_ROM_INT(RM690B0_BUFFER_DOUBLE) },
+
     // Font size constants
     { MP_ROM_QSTR(MP_QSTR_FONT_8x8),     MP_ROM_INT(0) },
     { MP_ROM_QSTR(MP_QSTR_FONT_16x16),   MP_ROM_INT(1) },
