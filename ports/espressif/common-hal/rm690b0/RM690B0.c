@@ -568,130 +568,130 @@ static inline void rm690b0_write_pixel_rotated(
     framebuffer[phys_y * fb_stride + phys_x] = color;
 }
 
-static void rm690b0_draw_glyph_8x8(rm690b0_rm690b0_obj_t *self,
+
+// ============================================================================
+// UNIFIED GLYPH RENDERING - single impl for all font sizes
+// ============================================================================
+
+/**
+ * Read one row of glyph bitmap as uint32_t.
+ * bytes_per_row: 1 (8px wide), 2 (16px), 3 (24px), 4 (32px).
+ * When called with a compile-time constant, GCC -O2 unrolls to hardcoded loads.
+ */
+static inline uint32_t rm690b0_read_glyph_row(
+    const uint8_t *glyph, int row, int bytes_per_row) {
+    uint32_t bits = 0;
+    const uint8_t *p = glyph + row * bytes_per_row;
+    for (int i = 0; i < bytes_per_row; i++) {
+        bits = (bits << 8) | p[i];
+    }
+    return bits;
+}
+
+/**
+ * Universal glyph renderer for all font sizes and all rotations.
+ * glyph_w must be a multiple of 8 (8, 16, 24, 32).
+ * Thin static-inline wrappers below pass compile-time constants,
+ * allowing GCC to fully optimize the bit-read loop per font size.
+ */
+static void rm690b0_draw_glyph_impl(
+    rm690b0_rm690b0_obj_t *self,
     mp_int_t x, mp_int_t y,
     const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush,
+    int glyph_w, int glyph_h) {
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     if (impl == NULL || impl->framebuffer == NULL) {
         return;
     }
 
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 8 <= 0 || y + 8 <= 0) {
+    // Early exit: glyph completely off-screen
+    if (x >= self->width || y >= self->height ||
+        x + glyph_w <= 0 || y + glyph_h <= 0) {
         return;
     }
 
-    // Calculate clipping bounds
+    // Clipping bounds
     mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 8 > self->width) ? (self->width - x) : 8;
+    mp_int_t col_end   = (x + glyph_w > self->width)  ? (self->width  - x) : glyph_w;
     mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 8 > self->height) ? (self->height - y) : 8;
+    mp_int_t row_end   = (y + glyph_h > self->height) ? (self->height - y) : glyph_h;
 
-    // Pre-swap colors once (not per-pixel)
     uint16_t fg_swapped = RGB565_SWAP_GB(fg);
     uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
 
-    // Batch write to framebuffer with rotation support (only visible pixels)
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
+    int bytes_per_row   = glyph_w / 8;
+    uint32_t top_bit    = 0x80000000u >> (32 - glyph_w);
+
+    const mp_int_t rot  = self->rotation;
+    size_t fb_stride    = RM690B0_PANEL_WIDTH;
+    uint16_t *fb_ptr    = impl->framebuffer;
+
+    if (rot == 0) {
         for (int row = row_start; row < row_end; row++) {
-            uint8_t bits = glyph[row];
+            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
             size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
             for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80 >> col)) != 0;
-                if (on) {
+                if (bits & (top_bit >> col)) {
                     fb_ptr[row_offset + (col - col_start)] = fg_swapped;
                 } else if (has_bg) {
                     fb_ptr[row_offset + (col - col_start)] = bg_swapped;
                 }
             }
         }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-
-        // 90deg: phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1
-        //        phys_y = x + col
-        //        index = (x + col) * stride + (PANEL_WIDTH - y - row - 1)
-
+    } else if (rot == 90) {
         for (int row = row_start; row < row_end; row++) {
-            uint8_t bits = glyph[row];
+            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
             mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            // Base index for col=0. As col increases, phys_y increases, so index increases by stride.
             size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-
             for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80 >> col)) != 0;
-                if (on) {
+                if (bits & (top_bit >> col)) {
                     fb_ptr[start_index] = fg_swapped;
                 } else if (has_bg) {
                     fb_ptr[start_index] = bg_swapped;
                 }
-                start_index += fb_stride; // phys_y increments
+                start_index += fb_stride;
             }
         }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-
-        // 180deg: phys_x = RM690B0_PANEL_WIDTH - (x + col) - 1
-        //         phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1
-
+    } else if (rot == 180) {
         for (int row = row_start; row < row_end; row++) {
-            uint8_t bits = glyph[row];
+            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
             mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
             mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-
-            // As col increases, phys_x decreases, index decreases by 1
             size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-
             for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80 >> col)) != 0;
-                if (on) {
+                if (bits & (top_bit >> col)) {
                     fb_ptr[start_index] = fg_swapped;
                 } else if (has_bg) {
                     fb_ptr[start_index] = bg_swapped;
                 }
-                start_index--; // phys_x decrements
+                start_index--;
             }
         }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-
-        // 270deg: phys_x = y + row
-        //         phys_y = RM690B0_PANEL_HEIGHT - (x + col) - 1
-
+    } else if (rot == 270) {
         for (int row = row_start; row < row_end; row++) {
-            uint8_t bits = glyph[row];
+            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
             mp_int_t phys_x = y + row;
             mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-
-            // As col increases, phys_y decreases, index decreases by stride
             size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-
             for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80 >> col)) != 0;
-                if (on) {
+                if (bits & (top_bit >> col)) {
                     fb_ptr[start_index] = fg_swapped;
                 } else if (has_bg) {
                     fb_ptr[start_index] = bg_swapped;
                 }
-                start_index -= fb_stride; // phys_y decrements
+                start_index -= fb_stride;
             }
         }
     }
 
-    // Mark dirty region and flush once (not per-pixel)
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 8, dirty_h = 8;
+    mp_int_t dirty_x = x, dirty_y = y, dirty_w = glyph_w, dirty_h = glyph_h;
     if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
         mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
         if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
+            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y,
+                                                  dirty_w, dirty_h, false);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Glyph flush failed: %s", esp_err_to_name(ret));
             }
@@ -699,687 +699,43 @@ static void rm690b0_draw_glyph_8x8(rm690b0_rm690b0_obj_t *self,
     }
 }
 
-static void rm690b0_draw_glyph_16x16(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 16 <= 0 || y + 16 <= 0) {
-        return;
-    }
-
-    // Calculate clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 16 > self->width) ? (self->width - x) : 16;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 16 > self->height) ? (self->height - y) : 16;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 16, dirty_h = 16;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph 16x16 flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
+// Thin wrappers — pass compile-time constants so GCC can fully optimize impl
+static inline void rm690b0_draw_glyph_8x8(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 8, 8);
+}
+static inline void rm690b0_draw_glyph_16x16(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 16, 16);
+}
+static inline void rm690b0_draw_glyph_16x24(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 16, 24);
+}
+static inline void rm690b0_draw_glyph_24x24(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 24, 24);
+}
+static inline void rm690b0_draw_glyph_24x32(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 24, 32);
+}
+static inline void rm690b0_draw_glyph_32x32(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 32, 32);
+}
+static inline void rm690b0_draw_glyph_32x48(
+    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 32, 48);
 }
 
-static void rm690b0_draw_glyph_16x24(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 16 <= 0 || y + 24 <= 0) {
-        return;
-    }
-
-    // Calculate clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 16 > self->width) ? (self->width - x) : 16;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 24 > self->height) ? (self->height - y) : 24;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint16_t bits = ((uint16_t)glyph[row * 2] << 8) | glyph[row * 2 + 1];
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x8000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 16, dirty_h = 24;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph 16x24 flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
-}
-
-static void rm690b0_draw_glyph_24x24(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 24 <= 0 || y + 24 <= 0) {
-        return;
-    }
-
-    // Calculate clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 24 > self->width) ? (self->width - x) : 24;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 24 > self->height) ? (self->height - y) : 24;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 24, dirty_h = 24;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph 24x24 flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
-}
-
-static void rm690b0_draw_glyph_24x32(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 24 <= 0 || y + 32 <= 0) {
-        return;
-    }
-
-    // Calculate clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 24 > self->width) ? (self->width - x) : 24;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 32 > self->height) ? (self->height - y) : 32;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 3] << 16) |
-                ((uint32_t)glyph[row * 3 + 1] << 8) |
-                glyph[row * 3 + 2];
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x800000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 24, dirty_h = 32;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph 24x32 flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
-}
-
-static void rm690b0_draw_glyph_32x32(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 32 <= 0 || y + 32 <= 0) {
-        return;
-    }
-
-    // Calculate clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 32 > self->width) ? (self->width - x) : 32;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 32 > self->height) ? (self->height - y) : 32;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 32, dirty_h = 32;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph 32x32 flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
-}
-
-static void rm690b0_draw_glyph_32x48(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: check if glyph is completely off-screen
-    if (x >= self->width || y >= self->height || x + 32 <= 0 || y + 48 <= 0) {
-        return;
-    }
-
-    // Calculate clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end = (x + 32 > self->width) ? (self->width - x) : 32;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end = (y + 48 > self->height) ? (self->height - y) : 48;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (self->rotation == 90) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (self->rotation == 180) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (self->rotation == 270) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb_ptr = impl->framebuffer;
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = ((uint32_t)glyph[row * 4] << 24) |
-                ((uint32_t)glyph[row * 4 + 1] << 16) |
-                ((uint32_t)glyph[row * 4 + 2] << 8) |
-                glyph[row * 4 + 3];
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                bool on = (bits & (0x80000000 >> col)) != 0;
-                if (on) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = 32, dirty_h = 48;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph 32x48 flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
-}
 
 // NOTE: Text state is currently stateless per-instance in C; we use a static variable
 // for font id to avoid changing struct layout. 0 = 8x8 monospace.
