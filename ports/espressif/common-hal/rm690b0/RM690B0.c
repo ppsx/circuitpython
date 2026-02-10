@@ -96,7 +96,7 @@ static const char *TAG = "rm690b0";
 #define RM690B0_PANEL_HEIGHT         LCD_V_RES
 #define RM690B0_X_GAP                (CIRCUITPY_RM690B0_X_GAP)
 #define RM690B0_Y_GAP                (CIRCUITPY_RM690B0_Y_GAP)
-#define RM690B0_MAX_CHUNK_ROWS       (24)
+#define RM690B0_MAX_CHUNK_ROWS       (32)  // Max safe value: 38.4 KB (34+ rows cause DMA errors)
 #define RM690B0_MAX_CHUNK_PIXELS     (LCD_H_RES * RM690B0_MAX_CHUNK_ROWS)
 #define RM690B0_MAX_DIAMETER         ((RM690B0_PANEL_WIDTH * 2) + 1)
 #define RM690B0_PANEL_IO_QUEUE_DEPTH (10)
@@ -301,6 +301,7 @@ static inline void rm690b0_fill_span_fast(uint16_t *dest, size_t span_width, uin
         return;
     }
 
+    // Handle unaligned start pixel (not 32-bit aligned)
     if (((uintptr_t)dest & 0x2) != 0) {
         *dest++ = color;
         span_width--;
@@ -309,15 +310,28 @@ static inline void rm690b0_fill_span_fast(uint16_t *dest, size_t span_width, uin
         }
     }
 
-    while (span_width >= 2) {
-        dest[0] = color;
-        dest[1] = color;
-        dest += 2;
-        span_width -= 2;
+    // Fast 32-bit word writes: 2 pixels per operation
+    // Cast via uintptr_t: alignment is guaranteed by the & 0x2 check above
+    uint32_t color_word = ((uint32_t)color << 16) | color;
+    uint32_t *word_ptr = (uint32_t *)(uintptr_t)dest;
+    size_t word_count = span_width / 2;
+
+    while (word_count >= 4) {
+        word_ptr[0] = color_word;
+        word_ptr[1] = color_word;
+        word_ptr[2] = color_word;
+        word_ptr[3] = color_word;
+        word_ptr += 4;
+        word_count -= 4;
+    }
+    while (word_count > 0) {
+        *word_ptr++ = color_word;
+        word_count--;
     }
 
+    // Handle remaining odd pixel
     if (span_width & 1) {
-        *dest = color;
+        *((uint16_t *)word_ptr) = color;
     }
 }
 
@@ -2298,6 +2312,23 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "Display filled with black");
 
+    // Pre-allocate span cache for circle rendering (eliminates realloc spikes)
+    // Cost: RM690B0_PANEL_HEIGHT * 2 * 2 bytes = 1.8 KB IRAM
+    if (impl->circle_span_cache == NULL) {
+        size_t max_span_rows = RM690B0_PANEL_HEIGHT;
+        impl->circle_span_cache = (int16_t *)heap_caps_malloc(
+            max_span_rows * 2 * sizeof(int16_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (impl->circle_span_cache == NULL) {
+            ESP_LOGW(TAG, "Failed to pre-allocate span cache - will use dynamic alloc");
+            impl->circle_span_capacity = 0;
+        } else {
+            impl->circle_span_capacity = max_span_rows;
+            ESP_LOGI(TAG, "Pre-allocated span cache: %zu rows (%zu bytes)",
+                     max_span_rows, max_span_rows * 2 * sizeof(int16_t));
+        }
+    }
+
     self->rotation = 0;
     self->width = RM690B0_PANEL_WIDTH;
     self->height = RM690B0_PANEL_HEIGHT;
@@ -2531,9 +2562,8 @@ static void rm690b0_fill_rect_framebuffer(rm690b0_impl_t *impl,
 
     uint16_t *base_ptr = impl->framebuffer + (size_t)by * RM690B0_PANEL_WIDTH + bx;
 
-    for (mp_int_t col = 0; col < bw; col++) {
-        base_ptr[col] = swapped_color;
-    }
+    // Fill first row with 32-bit word writes
+    rm690b0_fill_span_fast(base_ptr, (size_t)bw, swapped_color);
 
     mp_int_t filled_rows = 1;
     size_t row_bytes = (size_t)bw * sizeof(uint16_t);
