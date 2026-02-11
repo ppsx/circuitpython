@@ -253,7 +253,7 @@ static inline void rm690b0_wait_for_all_dma(rm690b0_impl_t *impl) {
 // Forward declarations for functions used by font rendering
 static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h);
 static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, bool skip_final_delay);
+    mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height);
 static void rm690b0_fill_rect_framebuffer(rm690b0_impl_t *impl,
     mp_int_t bx, mp_int_t by, mp_int_t bw, mp_int_t bh, uint16_t swapped_color);
 
@@ -691,7 +691,7 @@ static void rm690b0_draw_glyph_impl(
         mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
         if (auto_flush && !impl->double_buffered) {
             esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y,
-                                                  dirty_w, dirty_h, false);
+                                                  dirty_w, dirty_h);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Glyph flush failed: %s", esp_err_to_name(ret));
             }
@@ -893,7 +893,7 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
 
         if (dirty_w > 0 && dirty_h > 0) {
             if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-                esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h, false);
+                esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h);
                 if (ret != ESP_OK) {
                     ESP_LOGE(TAG, "Batch text flush failed: %s", esp_err_to_name(ret));
                 }
@@ -1108,8 +1108,7 @@ static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_i
 }
 
 static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, bool skip_final_delay) {
-    (void)skip_final_delay;
+    mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height) {
 
     if (width <= 0 || height <= 0) {
         return ESP_OK;
@@ -1390,7 +1389,7 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         memset(impl->framebuffer, 0, framebuffer_pixels * sizeof(uint16_t));
 
         // Flush to display
-        esp_err_t ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, false);
+        esp_err_t ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
         if (ret == ESP_OK) {
             // Brief delay to ensure screen update completes
             rm690b0_wait_for_all_dma(impl);
@@ -1716,7 +1715,7 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     for (size_t i = 0; i < framebuffer_pixels; i++) {
         impl->framebuffer[i] = 0x0000;
     }
-    esp_err_t clear_ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, false);
+    esp_err_t clear_ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
     if (clear_ret != ESP_OK) {
         mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to clear display: %s"), esp_err_to_name(clear_ret));
         return;
@@ -2006,7 +2005,7 @@ void common_hal_rm690b0_rm690b0_pixel(rm690b0_rm690b0_obj_t *self, mp_int_t x, m
     // Only flush immediately if not double-buffered
     // When double-buffered, swap_buffers() will handle the flush
     if (!impl->double_buffered) {
-        esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh, false);
+        esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
         if (ret != ESP_OK) {
             mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw pixel: %s"), esp_err_to_name(ret));
         }
@@ -2082,7 +2081,7 @@ void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t 
     // Only flush immediately if not double-buffered
     // When double-buffered, swap_buffers() will handle the flush
     if (!impl->double_buffered) {
-        esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh, false);
+        esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
         if (ret != ESP_OK) {
             mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_rect: %s"), esp_err_to_name(ret));
         }
@@ -2232,7 +2231,7 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
     if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
         mark_dirty_region(impl, bx, by, bw, bh);
         if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh, false);
+            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
             if (ret != ESP_OK) {
                 mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw BMP: %s"), esp_err_to_name(ret));
             }
@@ -2363,7 +2362,7 @@ void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t 
         if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
             mark_dirty_region(impl, bx, by, bw, bh);
             if (!impl->double_buffered) {
-                esp_err_t flush_ret = rm690b0_flush_region(self, bx, by, bw, bh, false);
+                esp_err_t flush_ret = rm690b0_flush_region(self, bx, by, bw, bh);
                 if (flush_ret != ESP_OK) {
                     mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw JPEG: %s"), esp_err_to_name(flush_ret));
                 }
@@ -2505,7 +2504,7 @@ static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, 
     if (bw > 0 && bh > 0) {
         mark_dirty_region(impl, bx, by, bw, bh);
         if (!impl->double_buffered) {
-            rm690b0_flush_region(self, bx, by, bw, bh, false);
+            rm690b0_flush_region(self, bx, by, bw, bh);
         }
     }
 }
@@ -2608,7 +2607,7 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
         mark_dirty_region(impl, bx, by, bw, bh);
 
         if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh, false);
+            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
             if (ret != ESP_OK) {
                 mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw circle: %s"), esp_err_to_name(ret));
             }
@@ -2788,7 +2787,7 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
         mark_dirty_region(impl, clip_bx, clip_by, clip_bw, clip_bh);
 
         if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, clip_bx, clip_by, clip_bw, clip_bh, false);
+            esp_err_t ret = rm690b0_flush_region(self, clip_bx, clip_by, clip_bw, clip_bh);
             if (ret != ESP_OK) {
                 if (heap_span != NULL) {
                     heap_caps_free(heap_span);
@@ -3078,7 +3077,7 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
     // Only flush immediately if not double-buffered
     // When double-buffered, swap_buffers() will handle the flush
     if (!impl->double_buffered) {
-        esp_err_t ret = rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h, false);
+        esp_err_t ret = rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
         if (ret != ESP_OK) {
             mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw bitmap: %s"), esp_err_to_name(ret));
         }
@@ -3124,13 +3123,12 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
             if (merged_area > individual_area * 3 / 2) {
                 for (size_t i = 0; i < impl->dirty_count; i++) {
                     rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
-                    ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h,
-                                               i < impl->dirty_count - 1);
+                    ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
                     (void)ret;
                 }
             } else {
                 ret = rm690b0_flush_region(self, impl->dirty_merged_x, impl->dirty_merged_y,
-                                           impl->dirty_merged_w, impl->dirty_merged_h, false);
+                                           impl->dirty_merged_w, impl->dirty_merged_h);
                 if (ret != ESP_OK) {
                     mp_raise_msg_varg(&mp_type_RuntimeError,
                         MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
@@ -3138,7 +3136,7 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                 }
             }
         } else {
-            esp_err_t ret = rm690b0_flush_region(self, 0, 0, self->width, self->height, false);
+            esp_err_t ret = rm690b0_flush_region(self, 0, 0, self->width, self->height);
             if (ret != ESP_OK) {
                 mp_raise_msg_varg(&mp_type_RuntimeError,
                     MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
@@ -3169,8 +3167,7 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
             // Sparse update: flush individual rects (fewer pixels transferred)
             for (size_t i = 0; i < impl->dirty_count; i++) {
                 rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
-                bool skip_delay = (i < impl->dirty_count - 1);
-                rm690b0_flush_region(self, r->x, r->y, r->w, r->h, skip_delay);
+                rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
             }
         } else {
             // Dense update: flush merged rect (fewer DMA ops)
@@ -3178,11 +3175,11 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
             flush_y = impl->dirty_merged_y;
             flush_w = impl->dirty_merged_w;
             flush_h = impl->dirty_merged_h;
-            rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h, copy);
+            rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
         }
     } else {
         ESP_LOGI(TAG, "Flushing full screen (no dirty region)");
-        rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h, copy);
+        rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
     }
 
     // Now swap the buffer pointers

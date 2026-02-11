@@ -180,29 +180,9 @@ static esp_err_t panel_rm690b0_reset(esp_lcd_panel_t *panel) {
     return ESP_OK;
 }
 
-static const rm690b0_lcd_init_cmd_t vendor_specific_init_default[] = {
-//  {cmd, { data }, data_size, delay_ms}
-    {0xFE, (uint8_t []) {0x20}, 1, 0},
-    {0x26, (uint8_t []) {0x0A}, 1, 0},
-    {0x24, (uint8_t []) {0x80}, 1, 0},
-    {0xFE, (uint8_t []) {0x00}, 1, 0},
-    {0x3A, (uint8_t []) {0x55}, 1, 0},
-    {0xC2, (uint8_t []) {0x00}, 1, 10},
-    {0x35, (uint8_t []) {0x00}, 0, 0},
-    {0x51, (uint8_t []) {0x00}, 1, 10},
-    {0x11, (uint8_t []) {0x00}, 0, 80},
-    {0x2A, (uint8_t []) {0x00, 0x10, 0x01, 0xD1}, 4, 0},
-    {0x2B, (uint8_t []) {0x00, 0x00, 0x02, 0x57}, 4, 0},
-    {0x29, (uint8_t []) {0x00}, 0, 10},
-    {0x51, (uint8_t []) {0xFF}, 1, 0},
-    {0x51, (uint8_t []) {0xFF}, 1, 0},
-};
-
 static esp_err_t panel_rm690b0_init(esp_lcd_panel_t *panel) {
     rm690b0_panel_t *rm690b0 = __containerof(panel, rm690b0_panel_t, base);
     esp_lcd_panel_io_handle_t io = rm690b0->io;
-    const rm690b0_lcd_init_cmd_t *init_cmds = NULL;
-    uint16_t init_cmds_size = 0;
     bool is_cmd_overwritten = false;
 
     ESP_RETURN_ON_ERROR(tx_param(rm690b0, io, LCD_CMD_MADCTL, (uint8_t[]) {
@@ -212,14 +192,12 @@ static esp_err_t panel_rm690b0_init(esp_lcd_panel_t *panel) {
         rm690b0->colmod_val,
     }, 1), TAG, "send command failed");
 
-    // vendor specific initialization, it can be different between manufacturers
-    // should consult the LCD supplier for initialization sequence code
-    if (rm690b0->init_cmds) {
-        init_cmds = rm690b0->init_cmds;
-        init_cmds_size = rm690b0->init_cmds_size;
-    } else {
-        init_cmds = vendor_specific_init_default;
-        init_cmds_size = sizeof(vendor_specific_init_default) / sizeof(rm690b0_lcd_init_cmd_t);
+    // Init commands must be provided via vendor_config.init_cmds (set in RM690B0.c)
+    const rm690b0_lcd_init_cmd_t *init_cmds = rm690b0->init_cmds;
+    uint16_t init_cmds_size = rm690b0->init_cmds_size;
+    if (init_cmds == NULL || init_cmds_size == 0) {
+        ESP_LOGE(TAG, "no init commands provided");
+        return ESP_ERR_INVALID_STATE;
     }
 
     for (int i = 0; i < init_cmds_size; i++) {
