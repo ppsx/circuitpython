@@ -55,8 +55,12 @@ static mp_obj_t rm690b0_lvgl_roller_make_new(const mp_obj_type_t *type, size_t n
 //|     """The options available in the roller, separated by newlines.
 //|     Setting this property updates the roller options."""
 static mp_obj_t rm690b0_lvgl_roller_get_options(mp_obj_t self_in) {
-    mp_raise_NotImplementedError(MP_ERROR_TEXT("Getting options not supported by LVGL API"));
-    return mp_const_none;
+    rm690b0_lvgl_roller_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    const char *options = common_hal_rm690b0_lvgl_roller_get_options(self);
+    if (options == NULL) {
+        return mp_const_empty_bytes;
+    }
+    return mp_obj_new_str(options, strlen(options));
 }
 
 static mp_obj_t rm690b0_lvgl_roller_set_options(mp_obj_t self_in, mp_obj_t options_obj) {

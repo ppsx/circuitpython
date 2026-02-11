@@ -41,6 +41,11 @@ void common_hal_rm690b0_lvgl_roller_construct(rm690b0_lvgl_roller_obj_t *self) {
     lv_roller_set_options(roller, "Option 1\nOption 2\nOption 3", LV_ROLLER_MODE_NORMAL);
 }
 
+const char *common_hal_rm690b0_lvgl_roller_get_options(rm690b0_lvgl_roller_obj_t *self) {
+    lv_obj_t *roller = common_hal_rm690b0_lvgl_widget_get_native_obj((rm690b0_lvgl_widget_obj_t *)self);
+    return lv_roller_get_options(roller);
+}
+
 void common_hal_rm690b0_lvgl_roller_set_options(rm690b0_lvgl_roller_obj_t *self, const char *options, mp_int_t mode) {
     lv_obj_t *roller = common_hal_rm690b0_lvgl_widget_get_native_obj((rm690b0_lvgl_widget_obj_t *)self);
     // mode 0: Normal, 1: Infinite
