@@ -53,3 +53,6 @@ void common_hal_rm690b0_rm690b0_deinit_all(void);
 void common_hal_rm690b0_rm690b0_set_font(rm690b0_rm690b0_obj_t *self, mp_int_t font_id);
 void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
     const char *text, size_t text_len, uint16_t fg, bool has_bg, uint16_t bg);
+mp_int_t common_hal_rm690b0_rm690b0_get_font_width(rm690b0_rm690b0_obj_t *self);
+mp_int_t common_hal_rm690b0_rm690b0_get_font_height(rm690b0_rm690b0_obj_t *self);
+mp_int_t common_hal_rm690b0_rm690b0_get_text_width(rm690b0_rm690b0_obj_t *self, const char *text, size_t len);

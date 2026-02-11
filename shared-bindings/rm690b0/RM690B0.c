@@ -499,6 +499,48 @@ MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_rm690b0_get_height_obj, rm690b0_rm690b0_get_he
 MP_PROPERTY_GETTER(rm690b0_rm690b0_height_obj,
     (mp_obj_t)&rm690b0_rm690b0_get_height_obj);
 
+//|     font_width: int
+//|     """Current font width in pixels (read-only). Depends on active font set via set_font()."""
+static mp_obj_t rm690b0_rm690b0_get_font_width(mp_obj_t self_in) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    return mp_obj_new_int(common_hal_rm690b0_rm690b0_get_font_width(self));
+}
+MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_rm690b0_get_font_width_obj, rm690b0_rm690b0_get_font_width);
+
+MP_PROPERTY_GETTER(rm690b0_rm690b0_font_width_obj,
+    (mp_obj_t)&rm690b0_rm690b0_get_font_width_obj);
+
+//|     font_height: int
+//|     """Current font height in pixels (read-only). Depends on active font set via set_font()."""
+static mp_obj_t rm690b0_rm690b0_get_font_height(mp_obj_t self_in) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    return mp_obj_new_int(common_hal_rm690b0_rm690b0_get_font_height(self));
+}
+MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_rm690b0_get_font_height_obj, rm690b0_rm690b0_get_font_height);
+
+MP_PROPERTY_GETTER(rm690b0_rm690b0_font_height_obj,
+    (mp_obj_t)&rm690b0_rm690b0_get_font_height_obj);
+
+//|     def text_width(self, text: str) -> int:
+//|         """Calculate pixel width of text string using current font.
+//|
+//|         Newlines and carriage returns are not counted.
+//|         Useful for centering or right-aligning text.
+//|
+//|         :param str text: Text string to measure
+//|         :return: Width in pixels
+//|         """
+//|         ...
+//|
+static mp_obj_t rm690b0_rm690b0_text_width(mp_obj_t self_in, mp_obj_t text_obj) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(text_obj, &bufinfo, MP_BUFFER_READ);
+    mp_int_t width = common_hal_rm690b0_rm690b0_get_text_width(self, bufinfo.buf, bufinfo.len);
+    return mp_obj_new_int(width);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(rm690b0_rm690b0_text_width_obj, rm690b0_rm690b0_text_width);
+
 static const mp_rom_map_elem_t rm690b0_rm690b0_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_deinit), MP_ROM_PTR(&rm690b0_rm690b0_deinit_obj) },
 
@@ -518,6 +560,9 @@ static const mp_rom_map_elem_t rm690b0_rm690b0_locals_dict_table[] = {
     // Built-in text and font API
     { MP_ROM_QSTR(MP_QSTR_set_font), MP_ROM_PTR(&rm690b0_rm690b0_set_font_obj) },
     { MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&rm690b0_rm690b0_text_obj) },
+    { MP_ROM_QSTR(MP_QSTR_text_width), MP_ROM_PTR(&rm690b0_rm690b0_text_width_obj) },
+    { MP_ROM_QSTR(MP_QSTR_font_width), MP_ROM_PTR(&rm690b0_rm690b0_font_width_obj) },
+    { MP_ROM_QSTR(MP_QSTR_font_height), MP_ROM_PTR(&rm690b0_rm690b0_font_height_obj) },
 
     { MP_ROM_QSTR(MP_QSTR_rotation), MP_ROM_PTR(&rm690b0_rm690b0_rotation_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_buffer), MP_ROM_PTR(&rm690b0_rm690b0_blit_buffer_obj) },

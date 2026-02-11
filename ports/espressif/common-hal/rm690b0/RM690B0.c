@@ -752,6 +752,40 @@ static inline mp_int_t rm690b0_get_current_font(const rm690b0_rm690b0_obj_t *sel
     return self->font_id;
 }
 
+// Helper function to get font dimensions (width, height) by font ID
+static inline void rm690b0_get_font_dims(mp_int_t font_id, mp_int_t *width, mp_int_t *height) {
+    switch (font_id) {
+        case RM690B0_FONT_16x16_MONO:
+            *width = 16;
+            *height = 16;
+            break;
+        case RM690B0_FONT_16x24_MONO:
+            *width = 16;
+            *height = 24;
+            break;
+        case RM690B0_FONT_24x24_MONO:
+            *width = 24;
+            *height = 24;
+            break;
+        case RM690B0_FONT_24x32_MONO:
+            *width = 24;
+            *height = 32;
+            break;
+        case RM690B0_FONT_32x32_MONO:
+            *width = 32;
+            *height = 32;
+            break;
+        case RM690B0_FONT_32x48_MONO:
+            *width = 32;
+            *height = 48;
+            break;
+        default: // RM690B0_FONT_8x8_MONO
+            *width = 8;
+            *height = 8;
+            break;
+    }
+}
+
 void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
     const char *text, size_t text_len, uint16_t fg, bool has_bg, uint16_t bg) {
 
@@ -768,36 +802,7 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
 
     // Determine font dimensions based on ID
     mp_int_t font_width, font_height;
-    switch (font_id) {
-        case RM690B0_FONT_16x16_MONO:
-            font_width = 16;
-            font_height = 16;
-            break;
-        case RM690B0_FONT_16x24_MONO:
-            font_width = 16;
-            font_height = 24;
-            break;
-        case RM690B0_FONT_24x24_MONO:
-            font_width = 24;
-            font_height = 24;
-            break;
-        case RM690B0_FONT_24x32_MONO:
-            font_width = 24;
-            font_height = 32;
-            break;
-        case RM690B0_FONT_32x32_MONO:
-            font_width = 32;
-            font_height = 32;
-            break;
-        case RM690B0_FONT_32x48_MONO:
-            font_width = 32;
-            font_height = 48;
-            break;
-        default: // RM690B0_FONT_8x8_MONO
-            font_width = 8;
-            font_height = 8;
-            break;
-    }
+    rm690b0_get_font_dims(font_id, &font_width, &font_height);
 
     // Initialize bounding box for batch flushing
     // min_x is always x because newlines reset cursor_x to x.
@@ -895,6 +900,36 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
             }
         }
     }
+}
+
+// Get current font width in pixels
+mp_int_t common_hal_rm690b0_rm690b0_get_font_width(rm690b0_rm690b0_obj_t *self) {
+    mp_int_t w, h;
+    rm690b0_get_font_dims(self->font_id, &w, &h);
+    return w;
+}
+
+// Get current font height in pixels
+mp_int_t common_hal_rm690b0_rm690b0_get_font_height(rm690b0_rm690b0_obj_t *self) {
+    mp_int_t w, h;
+    rm690b0_get_font_dims(self->font_id, &w, &h);
+    return h;
+}
+
+// Calculate pixel width of text string using current font
+// Newlines and carriage returns are not counted
+mp_int_t common_hal_rm690b0_rm690b0_get_text_width(rm690b0_rm690b0_obj_t *self, const char *text, size_t len) {
+    mp_int_t w, h;
+    rm690b0_get_font_dims(self->font_id, &w, &h);
+
+    // Count visible characters (exclude newlines and carriage returns)
+    size_t visible = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] != '\n' && text[i] != '\r') {
+            visible++;
+        }
+    }
+    return (mp_int_t)visible * w;
 }
 
 static bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int_t *height) {
@@ -1762,15 +1797,32 @@ static void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t colo
         dma_lines = RM690B0_PANEL_HEIGHT;
     }
     const size_t line_pixels = RM690B0_PANEL_WIDTH;
-    const size_t dma_pixels = line_pixels * dma_lines;
-    const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
 
-    uint16_t *dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
-    if (dma_buffer == NULL) {
-        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("fill_color: unable to allocate DMA buffer"));
-        return;
+    // Prefer pre-allocated chunk_buffers over heap malloc to avoid fragmentation
+    uint16_t *dma_buffer = NULL;
+    bool allocated = false;
+
+    if (impl->chunk_buffers[0] != NULL && impl->chunk_buffer_pixels > 0) {
+        // Use static chunk buffer - adjust dma_lines to fit
+        size_t max_lines = impl->chunk_buffer_pixels / line_pixels;
+        if (max_lines > 0 && max_lines < dma_lines) {
+            dma_lines = max_lines;
+        }
+        dma_buffer = impl->chunk_buffers[0];
+    } else {
+        // Fallback: allocate from heap
+        const size_t dma_pixels = line_pixels * dma_lines;
+        const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
+        dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
+        if (dma_buffer == NULL) {
+            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("fill_color: unable to allocate DMA buffer"));
+            return;
+        }
+        allocated = true;
     }
 
+    // Fill buffer with color
+    const size_t dma_pixels = line_pixels * dma_lines;
     for (size_t i = 0; i < dma_pixels; i++) {
         dma_buffer[i] = swapped;
     }
@@ -1811,7 +1863,10 @@ static void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t colo
         impl->dirty_merged_valid = false;
     }
 
-    heap_caps_free(dma_buffer);
+    // Only free if we allocated from heap
+    if (allocated) {
+        heap_caps_free(dma_buffer);
+    }
 
     if (ret != ESP_OK) {
         mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("fill_color failed: %s"), esp_err_to_name(ret));
@@ -1835,14 +1890,31 @@ static esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
         dma_lines = rows;
     }
     const size_t line_pixels = RM690B0_PANEL_WIDTH;
-    const size_t dma_pixels = line_pixels * dma_lines;
-    const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
 
-    uint16_t *dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
-    if (dma_buffer == NULL) {
-        return ESP_ERR_NO_MEM;
+    // Prefer pre-allocated chunk_buffers over heap malloc to avoid fragmentation
+    uint16_t *dma_buffer = NULL;
+    bool allocated = false;
+
+    if (impl->chunk_buffers[0] != NULL && impl->chunk_buffer_pixels > 0) {
+        // Use static chunk buffer - adjust dma_lines to fit
+        size_t max_lines = impl->chunk_buffer_pixels / line_pixels;
+        if (max_lines > 0 && max_lines < dma_lines) {
+            dma_lines = max_lines;
+        }
+        dma_buffer = impl->chunk_buffers[0];
+    } else {
+        // Fallback: allocate from heap
+        const size_t dma_pixels = line_pixels * dma_lines;
+        const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
+        dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
+        if (dma_buffer == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        allocated = true;
     }
 
+    // Fill buffer with color
+    const size_t dma_pixels = line_pixels * dma_lines;
     for (size_t i = 0; i < dma_pixels; i++) {
         dma_buffer[i] = swapped_color;
     }
@@ -1875,7 +1947,11 @@ static esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
     }
 
     rm690b0_wait_for_all_dma(impl);
-    heap_caps_free(dma_buffer);
+
+    // Only free if we allocated from heap
+    if (allocated) {
+        heap_caps_free(dma_buffer);
+    }
 
     if (ret == ESP_OK && impl->framebuffer != NULL) {
         rm690b0_fill_rect_framebuffer(impl, 0, start_y, RM690B0_PANEL_WIDTH, rows, swapped_color);
@@ -1897,6 +1973,9 @@ void common_hal_rm690b0_rm690b0_fill_color(rm690b0_rm690b0_obj_t *self, uint16_t
 }
 
 void common_hal_rm690b0_rm690b0_pixel(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t color) {
+    // NOTE: In single-buffer mode (BUFFER_SINGLE), each pixel() call triggers an immediate
+    // DMA flush. For batch pixel operations, use fill_rect(x, y, 1, 1, color) which only
+    // marks the region as dirty without flushing until swap_buffers() is called.
     CHECK_INITIALIZED();
 
     mp_int_t bx = x;
