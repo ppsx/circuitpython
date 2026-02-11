@@ -2574,89 +2574,41 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
     }
 
     uint16_t swapped_color = RGB565_SWAP_GB(color);
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
 
+    // Bresenham circle — write_pixel_rotated handles rotation + bounds check
+    mp_int_t x0 = 0;
+    mp_int_t y0 = radius;
+    mp_int_t d = 1 - radius;
+    while (x0 <= y0) {
+        rm690b0_write_pixel_rotated(self, impl, x + x0, y + y0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x - x0, y + y0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x + x0, y - y0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x - x0, y - y0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x + y0, y + x0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x - y0, y + x0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x + y0, y - x0, swapped_color);
+        rm690b0_write_pixel_rotated(self, impl, x - y0, y - x0, swapped_color);
+        x0 += 1;
+        if (d < 0) {
+            d += (x0 << 1) + 1;
+        } else {
+            y0 -= 1;
+            d += ((x0 - y0) << 1) + 1;
+        }
+    }
+
+    // Dirty region: logical bounding box → clip → rotate → physical
     mp_int_t bx = x - radius;
     mp_int_t by = y - radius;
     mp_int_t bw = radius * 2 + 1;
     mp_int_t bh = radius * 2 + 1;
-    bool circle_fully_inside = (bx >= 0 && by >= 0 &&
-        bx + bw <= self->width && by + bh <= self->height);
+    if (clip_logical_rect(self, &bx, &by, &bw, &bh) &&
+        map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
 
-    #define RM690B0_DRAW_CIRCLE_LOOP() \
-    do { \
-        mp_int_t x0 = 0; \
-        mp_int_t y0 = radius; \
-        mp_int_t d = 1 - radius; \
-        while (x0 <= y0) { \
-            WRITE_CIRCLE_PIXEL(x + x0, y + y0); \
-            WRITE_CIRCLE_PIXEL(x - x0, y + y0); \
-            WRITE_CIRCLE_PIXEL(x + x0, y - y0); \
-            WRITE_CIRCLE_PIXEL(x - x0, y - y0); \
-            WRITE_CIRCLE_PIXEL(x + y0, y + x0); \
-            WRITE_CIRCLE_PIXEL(x - y0, y + x0); \
-            WRITE_CIRCLE_PIXEL(x + y0, y - x0); \
-            WRITE_CIRCLE_PIXEL(x - y0, y - x0); \
-            x0 += 1; \
-            if (d < 0) { \
-                d += (x0 << 1) + 1; \
-            } else { \
-                y0 -= 1; \
-                d += ((x0 - y0) << 1) + 1; \
-            } \
-        } \
-    } while (0)
+        mark_dirty_region(impl, bx, by, bw, bh);
 
-    if (circle_fully_inside) {
-        #define WRITE_CIRCLE_PIXEL(px, py) \
-    impl->framebuffer[(size_t)(py) * fb_stride + (px)] = swapped_color
-        RM690B0_DRAW_CIRCLE_LOOP();
-#undef WRITE_CIRCLE_PIXEL
-    } else {
-        #define WRITE_CIRCLE_PIXEL(px, py) do { \
-        mp_int_t px_val = (px); \
-        mp_int_t py_val = (py); \
-        if (px_val >= 0 && px_val < self->width && \
-            py_val >= 0 && py_val < self->height) { \
-            impl->framebuffer[(size_t)py_val * fb_stride + px_val] = swapped_color; \
-        } \
-} while (0)
-        RM690B0_DRAW_CIRCLE_LOOP();
-#undef WRITE_CIRCLE_PIXEL
-    }
-
-#undef RM690B0_DRAW_CIRCLE_LOOP
-
-    mp_int_t clip_bx = bx;
-    mp_int_t clip_by = by;
-    mp_int_t clip_bw = bw;
-    mp_int_t clip_bh = bh;
-
-    if (!circle_fully_inside) {
-        if (clip_bx < 0) {
-            clip_bw += clip_bx;
-            clip_bx = 0;
-        }
-        if (clip_by < 0) {
-            clip_bh += clip_by;
-            clip_by = 0;
-        }
-        if (clip_bx + clip_bw > self->width) {
-            clip_bw = self->width - clip_bx;
-        }
-        if (clip_by + clip_bh > self->height) {
-            clip_bh = self->height - clip_by;
-        }
-    }
-
-    if (clip_bw > 0 && clip_bh > 0) {
-        // Mark region as dirty for next swap
-        mark_dirty_region(impl, clip_bx, clip_by, clip_bw, clip_bh);
-
-        // Only flush immediately if not double-buffered
-        // When double-buffered, swap_buffers() will handle the flush
         if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, clip_bx, clip_by, clip_bw, clip_bh, false);
+            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh, false);
             if (ret != ESP_OK) {
                 mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw circle: %s"), esp_err_to_name(ret));
             }
@@ -2763,79 +2715,78 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
     }
 
     uint16_t swapped_color = RGB565_SWAP_GB(color);
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
 
-    if (circle_fully_inside) {
-        for (mp_int_t row = 0; row < row_count; row++) {
-            int16_t span_left = left[row];
-            int16_t span_right = right[row];
-            if (span_left > span_right) {
-                continue;
+    if (self->rotation == 0) {
+        // Fast path — rotation 0: logical == physical, direct framebuffer spans
+        size_t fb_stride = RM690B0_PANEL_WIDTH;
+        if (circle_fully_inside) {
+            for (mp_int_t row = 0; row < row_count; row++) {
+                int16_t span_left = left[row];
+                int16_t span_right = right[row];
+                if (span_left > span_right) {
+                    continue;
+                }
+                mp_int_t yy = top + row;
+                size_t span_width = (size_t)(span_right - span_left + 1);
+                uint16_t *dest = impl->framebuffer + (size_t)yy * fb_stride + span_left;
+                rm690b0_fill_span_fast(dest, span_width, swapped_color);
             }
-            mp_int_t yy = top + row;
-            size_t span_width = (size_t)(span_right - span_left + 1);
-            uint16_t *dest = impl->framebuffer + (size_t)yy * fb_stride + span_left;
-            rm690b0_fill_span_fast(dest, span_width, swapped_color);
+        } else {
+            for (mp_int_t row = 0; row < row_count; row++) {
+                int16_t span_left = left[row];
+                int16_t span_right = right[row];
+                if (span_left > span_right) {
+                    continue;
+                }
+                mp_int_t yy = top + row;
+                if (yy < 0 || yy >= self->height) {
+                    continue;
+                }
+                mp_int_t span_left_i = (mp_int_t)span_left;
+                mp_int_t span_right_i = (mp_int_t)span_right;
+                if (span_left_i < 0) {
+                    span_left_i = 0;
+                }
+                if (span_right_i >= self->width) {
+                    span_right_i = self->width - 1;
+                }
+                mp_int_t span_width = span_right_i - span_left_i + 1;
+                if (span_width <= 0) {
+                    continue;
+                }
+                uint16_t *dest = impl->framebuffer + (size_t)yy * fb_stride + span_left_i;
+                rm690b0_fill_span_fast(dest, (size_t)span_width, swapped_color);
+            }
         }
     } else {
+        // Rotation path: per-span clip → rotate → fill_rect_framebuffer
         for (mp_int_t row = 0; row < row_count; row++) {
-            int16_t span_left = left[row];
-            int16_t span_right = right[row];
-            if (span_left > span_right) {
+            int16_t span_left_val = left[row];
+            int16_t span_right_val = right[row];
+            if (span_left_val > span_right_val) {
                 continue;
             }
-            mp_int_t yy = top + row;
-            if (yy < 0 || yy >= self->height) {
+            mp_int_t sx = (mp_int_t)span_left_val;
+            mp_int_t sy = top + row;
+            mp_int_t sw = (mp_int_t)(span_right_val - span_left_val + 1);
+            mp_int_t sh = 1;
+            if (!clip_logical_rect(self, &sx, &sy, &sw, &sh)) {
                 continue;
             }
-            mp_int_t span_left_i = (mp_int_t)span_left;
-            mp_int_t span_right_i = (mp_int_t)span_right;
-
-            if (span_left_i < 0) {
-                span_left_i = 0;
-            }
-            if (span_right_i >= self->width) {
-                span_right_i = self->width - 1;
-            }
-
-            mp_int_t span_width = span_right_i - span_left_i + 1;
-            if (span_width <= 0) {
+            if (!map_rect_for_rotation(self, &sx, &sy, &sw, &sh)) {
                 continue;
             }
-
-            uint16_t *dest = impl->framebuffer + (size_t)yy * fb_stride + span_left_i;
-            rm690b0_fill_span_fast(dest, (size_t)span_width, swapped_color);
+            rm690b0_fill_rect_framebuffer(impl, sx, sy, sw, sh, swapped_color);
         }
     }
 
-    mp_int_t clip_bx = bx;
-    mp_int_t clip_by = by;
-    mp_int_t clip_bw = bw;
-    mp_int_t clip_bh = bh;
+    // Dirty region: logical bounding box → clip → rotate → physical
+    mp_int_t clip_bx = bx, clip_by = by, clip_bw = bw, clip_bh = bh;
+    if (clip_logical_rect(self, &clip_bx, &clip_by, &clip_bw, &clip_bh) &&
+        map_rect_for_rotation(self, &clip_bx, &clip_by, &clip_bw, &clip_bh)) {
 
-    if (!circle_fully_inside) {
-        if (clip_bx < 0) {
-            clip_bw += clip_bx;
-            clip_bx = 0;
-        }
-        if (clip_by < 0) {
-            clip_bh += clip_by;
-            clip_by = 0;
-        }
-        if (clip_bx + clip_bw > self->width) {
-            clip_bw = self->width - clip_bx;
-        }
-        if (clip_by + clip_bh > self->height) {
-            clip_bh = self->height - clip_by;
-        }
-    }
-
-    if (clip_bw > 0 && clip_bh > 0) {
-        // Mark region as dirty for next swap
         mark_dirty_region(impl, clip_bx, clip_by, clip_bw, clip_bh);
 
-        // Only flush immediately if not double-buffered
-        // When double-buffered, swap_buffers() will handle the flush
         if (!impl->double_buffered) {
             esp_err_t ret = rm690b0_flush_region(self, clip_bx, clip_by, clip_bw, clip_bh, false);
             if (ret != ESP_OK) {
