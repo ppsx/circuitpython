@@ -439,6 +439,22 @@ static inline mp_int_t clamp_int(mp_int_t v, mp_int_t lo, mp_int_t hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static inline bool rm690b0_prepare_draw(const rm690b0_rm690b0_obj_t *self,
+    mp_int_t *x, mp_int_t *y, mp_int_t *w, mp_int_t *h) {
+    return clip_logical_rect(self, x, y, w, h) &&
+           map_rect_for_rotation(self, x, y, w, h);
+}
+
+static inline esp_err_t rm690b0_finalize_draw(
+    rm690b0_rm690b0_obj_t *self, rm690b0_impl_t *impl,
+    mp_int_t phys_x, mp_int_t phys_y, mp_int_t phys_w, mp_int_t phys_h) {
+    mark_dirty_region(impl, phys_x, phys_y, phys_w, phys_h);
+    if (!impl->double_buffered) {
+        return rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
+    }
+    return ESP_OK;
+}
+
 // Compile-time assertions to ensure fallback character '?' exists in all fonts
 _Static_assert('?' >= 32 && '?' <= 127, "Fallback character '?' must be in font range");
 _Static_assert(sizeof(rm690b0_font_8x8_data) / sizeof(rm690b0_font_8x8_data[0]) == 96,
@@ -520,6 +536,33 @@ static inline const uint8_t *rm690b0_get_32x48_glyph(uint32_t codepoint) {
 // OPTIMIZED FONT RENDERING - Universal rotation-aware batch write
 // ============================================================================
 
+static inline void rm690b0_map_point(const rm690b0_rm690b0_obj_t *self,
+    mp_int_t logical_x, mp_int_t logical_y,
+    mp_int_t *phys_x, mp_int_t *phys_y) {
+    switch (self->rotation) {
+        case 0:
+            *phys_x = logical_x;
+            *phys_y = logical_y;
+            break;
+        case 90:
+            *phys_x = RM690B0_PANEL_WIDTH - logical_y - 1;
+            *phys_y = logical_x;
+            break;
+        case 180:
+            *phys_x = RM690B0_PANEL_WIDTH - logical_x - 1;
+            *phys_y = RM690B0_PANEL_HEIGHT - logical_y - 1;
+            break;
+        case 270:
+            *phys_x = logical_y;
+            *phys_y = RM690B0_PANEL_HEIGHT - logical_x - 1;
+            break;
+        default:
+            *phys_x = logical_x;
+            *phys_y = logical_y;
+            break;
+    }
+}
+
 /**
  * Write a pixel to framebuffer with rotation support.
  * This inline helper handles all 4 rotations in one place.
@@ -531,41 +574,15 @@ static inline void rm690b0_write_pixel_rotated(
     mp_int_t logical_x, mp_int_t logical_y,
     uint16_t color) {
 
-    uint16_t *framebuffer = impl->framebuffer;
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
-
     mp_int_t phys_x, phys_y;
+    rm690b0_map_point(self, logical_x, logical_y, &phys_x, &phys_y);
 
-    // Transform logical coordinates to physical based on rotation
-    switch (self->rotation) {
-        case 0:
-            phys_x = logical_x;
-            phys_y = logical_y;
-            break;
-        case 90:
-            phys_x = RM690B0_PANEL_WIDTH - logical_y - 1;
-            phys_y = logical_x;
-            break;
-        case 180:
-            phys_x = RM690B0_PANEL_WIDTH - logical_x - 1;
-            phys_y = RM690B0_PANEL_HEIGHT - logical_y - 1;
-            break;
-        case 270:
-            phys_x = logical_y;
-            phys_y = RM690B0_PANEL_HEIGHT - logical_x - 1;
-            break;
-        default:
-            return;  // Invalid rotation
-    }
-
-    // Bounds check
     if (phys_x < 0 || phys_x >= RM690B0_PANEL_WIDTH ||
         phys_y < 0 || phys_y >= RM690B0_PANEL_HEIGHT) {
         return;
     }
 
-    // Direct write to framebuffer
-    framebuffer[phys_y * fb_stride + phys_x] = color;
+    impl->framebuffer[phys_y * RM690B0_PANEL_WIDTH + phys_x] = color;
 }
 
 
@@ -1982,10 +1999,7 @@ void common_hal_rm690b0_rm690b0_pixel(rm690b0_rm690b0_obj_t *self, mp_int_t x, m
     mp_int_t bw = 1;
     mp_int_t bh = 1;
 
-    if (!clip_logical_rect(self, &bx, &by, &bw, &bh)) {
-        return;
-    }
-    if (!map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
+    if (!rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
         return;
     }
 
@@ -1996,19 +2010,11 @@ void common_hal_rm690b0_rm690b0_pixel(rm690b0_rm690b0_obj_t *self, mp_int_t x, m
     }
 
     uint16_t swapped_color = RGB565_SWAP_GB(color);
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
-    impl->framebuffer[(size_t)by * fb_stride + bx] = swapped_color;
+    impl->framebuffer[(size_t)by * RM690B0_PANEL_WIDTH + bx] = swapped_color;
 
-    // Mark region as dirty for next swap
-    mark_dirty_region(impl, bx, by, bw, bh);
-
-    // Only flush immediately if not double-buffered
-    // When double-buffered, swap_buffers() will handle the flush
-    if (!impl->double_buffered) {
-        esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
-        if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw pixel: %s"), esp_err_to_name(ret));
-        }
+    esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+    if (ret != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw pixel: %s"), esp_err_to_name(ret));
     }
 }
 
@@ -2048,10 +2054,7 @@ void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t 
     mp_int_t bw = width;
     mp_int_t bh = height;
 
-    if (!clip_logical_rect(self, &bx, &by, &bw, &bh)) {
-        return;
-    }
-    if (!map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
+    if (!rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
         return;
     }
 
@@ -2075,16 +2078,9 @@ void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t 
 
     rm690b0_fill_rect_framebuffer(impl, bx, by, bw, bh, swapped_color);
 
-    // Mark region as dirty for next swap
-    mark_dirty_region(impl, bx, by, bw, bh);
-
-    // Only flush immediately if not double-buffered
-    // When double-buffered, swap_buffers() will handle the flush
-    if (!impl->double_buffered) {
-        esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
-        if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_rect: %s"), esp_err_to_name(ret));
-        }
+    esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+    if (ret != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_rect: %s"), esp_err_to_name(ret));
     }
 }
 
@@ -2226,15 +2222,12 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
         }
     }
 
-    // Mark dirty region
+    // Mark dirty region (clip_x/y already clipped, just need rotation mapping)
     mp_int_t bx = clip_x, by = clip_y, bw = clip_w, bh = clip_h;
     if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
-        mark_dirty_region(impl, bx, by, bw, bh);
-        if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
-            if (ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw BMP: %s"), esp_err_to_name(ret));
-            }
+        esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+        if (ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw BMP: %s"), esp_err_to_name(ret));
         }
     }
 }
@@ -2357,15 +2350,12 @@ void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t 
             return;
         }
 
-        // Mark dirty
+        // Mark dirty (clip_x/y already clipped, just need rotation mapping)
         mp_int_t bx = clip_x, by = clip_y, bw = clip_w, bh = clip_h;
         if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
-            mark_dirty_region(impl, bx, by, bw, bh);
-            if (!impl->double_buffered) {
-                esp_err_t flush_ret = rm690b0_flush_region(self, bx, by, bw, bh);
-                if (flush_ret != ESP_OK) {
-                    mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw JPEG: %s"), esp_err_to_name(flush_ret));
-                }
+            esp_err_t flush_ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+            if (flush_ret != ESP_OK) {
+                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw JPEG: %s"), esp_err_to_name(flush_ret));
             }
         }
     }
@@ -2411,32 +2401,8 @@ static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, 
     size_t fb_stride = RM690B0_PANEL_WIDTH;
 
     mp_int_t px0, py0, px1, py1;
-    switch (self->rotation) {
-        case 90:
-            px0 = RM690B0_PANEL_WIDTH - y0 - 1;
-            py0 = x0;
-            px1 = RM690B0_PANEL_WIDTH - y1 - 1;
-            py1 = x1;
-            break;
-        case 180:
-            px0 = RM690B0_PANEL_WIDTH - x0 - 1;
-            py0 = RM690B0_PANEL_HEIGHT - y0 - 1;
-            px1 = RM690B0_PANEL_WIDTH - x1 - 1;
-            py1 = RM690B0_PANEL_HEIGHT - y1 - 1;
-            break;
-        case 270:
-            px0 = y0;
-            py0 = RM690B0_PANEL_HEIGHT - x0 - 1;
-            px1 = y1;
-            py1 = RM690B0_PANEL_HEIGHT - x1 - 1;
-            break;
-        default:
-            px0 = x0;
-            py0 = y0;
-            px1 = x1;
-            py1 = y1;
-            break;
-    }
+    rm690b0_map_point(self, x0, y0, &px0, &py0);
+    rm690b0_map_point(self, x1, y1, &px1, &py1);
 
     mp_int_t pdx = labs(px1 - px0);
     mp_int_t pdy = labs(py1 - py0);
@@ -2502,10 +2468,7 @@ static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, 
     }
 
     if (bw > 0 && bh > 0) {
-        mark_dirty_region(impl, bx, by, bw, bh);
-        if (!impl->double_buffered) {
-            rm690b0_flush_region(self, bx, by, bw, bh);
-        }
+        rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
     }
 }
 
@@ -2601,16 +2564,10 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
     mp_int_t by = y - radius;
     mp_int_t bw = radius * 2 + 1;
     mp_int_t bh = radius * 2 + 1;
-    if (clip_logical_rect(self, &bx, &by, &bw, &bh) &&
-        map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
-
-        mark_dirty_region(impl, bx, by, bw, bh);
-
-        if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, bx, by, bw, bh);
-            if (ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw circle: %s"), esp_err_to_name(ret));
-            }
+    if (rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
+        esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+        if (ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw circle: %s"), esp_err_to_name(ret));
         }
     }
 }
@@ -2769,10 +2726,7 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
             mp_int_t sy = top + row;
             mp_int_t sw = (mp_int_t)(span_right_val - span_left_val + 1);
             mp_int_t sh = 1;
-            if (!clip_logical_rect(self, &sx, &sy, &sw, &sh)) {
-                continue;
-            }
-            if (!map_rect_for_rotation(self, &sx, &sy, &sw, &sh)) {
+            if (!rm690b0_prepare_draw(self, &sx, &sy, &sw, &sh)) {
                 continue;
             }
             rm690b0_fill_rect_framebuffer(impl, sx, sy, sw, sh, swapped_color);
@@ -2781,19 +2735,13 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
 
     // Dirty region: logical bounding box → clip → rotate → physical
     mp_int_t clip_bx = bx, clip_by = by, clip_bw = bw, clip_bh = bh;
-    if (clip_logical_rect(self, &clip_bx, &clip_by, &clip_bw, &clip_bh) &&
-        map_rect_for_rotation(self, &clip_bx, &clip_by, &clip_bw, &clip_bh)) {
-
-        mark_dirty_region(impl, clip_bx, clip_by, clip_bw, clip_bh);
-
-        if (!impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, clip_bx, clip_by, clip_bw, clip_bh);
-            if (ret != ESP_OK) {
-                if (heap_span != NULL) {
-                    heap_caps_free(heap_span);
-                }
-                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_circle: %s"), esp_err_to_name(ret));
+    if (rm690b0_prepare_draw(self, &clip_bx, &clip_by, &clip_bw, &clip_bh)) {
+        esp_err_t ret = rm690b0_finalize_draw(self, impl, clip_bx, clip_by, clip_bw, clip_bh);
+        if (ret != ESP_OK) {
+            if (heap_span != NULL) {
+                heap_caps_free(heap_span);
             }
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_circle: %s"), esp_err_to_name(ret));
         }
     }
 
@@ -3071,16 +3019,9 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
             return;
     }
 
-    // Mark region as dirty for next swap
-    mark_dirty_region(impl, phys_x, phys_y, phys_w, phys_h);
-
-    // Only flush immediately if not double-buffered
-    // When double-buffered, swap_buffers() will handle the flush
-    if (!impl->double_buffered) {
-        esp_err_t ret = rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
-        if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw bitmap: %s"), esp_err_to_name(ret));
-        }
+    esp_err_t ret = rm690b0_finalize_draw(self, impl, phys_x, phys_y, phys_w, phys_h);
+    if (ret != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw bitmap: %s"), esp_err_to_name(ret));
     }
 }
 
