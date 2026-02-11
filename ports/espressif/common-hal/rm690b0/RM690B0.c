@@ -2,272 +2,35 @@
 //
 // SPDX-License-Identifier: MIT
 
-#include "shared-bindings/rm690b0/RM690B0.h"
-#include "common-hal/rm690b0/RM690B0.h"
-#include "shared-bindings/microcontroller/Pin.h"
-#include "py/runtime.h"
-#include "py/mperrno.h"
+// Core: lifecycle (construct/deinit/init_display), DMA, flush, properties,
+// swap_buffers.  Drawing, text, and image functions live in separate files.
 
-#include "esp_log.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_heap_caps.h"
-#include "esp_rom_sys.h"
+#include "rm690b0_internal.h"
 
-static const char *TAG = "rm690b0";
+// ============================================================================
+// Global definitions (extern'd in rm690b0_internal.h)
+// ============================================================================
 
-#include "esp-idf/components/esp_lcd/include/esp_lcd_panel_io.h"
-#include "esp-idf/components/esp_lcd/include/esp_lcd_panel_vendor.h"
-#include "esp-idf/components/esp_lcd/include/esp_lcd_panel_ops.h"
-#include "esp-idf/components/esp_lcd/include/esp_lcd_panel_commands.h"
-#include "esp_lcd_rm690b0.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-#include <string.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <limits.h>
-#include "esp_attr.h"
-#include "esp_jpeg.h"
-#include "fonts/rm690b0_font_8x8.h"
-#include "fonts/rm690b0_font_16x16.h"
-#include "fonts/rm690b0_font_16x24.h"
-#include "fonts/rm690b0_font_24x24.h"
-#include "fonts/rm690b0_font_24x32.h"
-#include "fonts/rm690b0_font_32x32.h"
-#include "fonts/rm690b0_font_32x48.h"
+const char *TAG = "rm690b0";
+portMUX_TYPE rm690b0_spinlock = portMUX_INITIALIZER_UNLOCKED;
+rm690b0_rm690b0_obj_t *rm690b0_singleton = NULL;
 
-#if !defined(CIRCUITPY_RM690B0_QSPI_CS) || !defined(CIRCUITPY_RM690B0_QSPI_CLK) || \
-    !defined(CIRCUITPY_RM690B0_QSPI_D0) || !defined(CIRCUITPY_RM690B0_QSPI_D1) || \
-    !defined(CIRCUITPY_RM690B0_QSPI_D2) || !defined(CIRCUITPY_RM690B0_QSPI_D3) || \
-    !defined(CIRCUITPY_RM690B0_RESET) || !defined(CIRCUITPY_RM690B0_WIDTH) || \
-    !defined(CIRCUITPY_RM690B0_HEIGHT) || !defined(CIRCUITPY_RM690B0_BITS_PER_PIXEL)
-#error "Board must define CIRCUITPY_RM690B0_* macros to describe the RM690B0 hardware"
-#endif
+// ============================================================================
+// ISR callback
+// ============================================================================
 
-#ifndef CIRCUITPY_RM690B0_POWER
-#define CIRCUITPY_RM690B0_POWER (NULL)
-#endif
-
-#ifndef CIRCUITPY_RM690B0_POWER_ON_LEVEL
-#define CIRCUITPY_RM690B0_POWER_ON_LEVEL (1)  // GPIO level: 1=high, 0=low
-#endif
-
-#ifndef CIRCUITPY_RM690B0_USE_QSPI
-#define CIRCUITPY_RM690B0_USE_QSPI (0)
-#endif
-
-#ifndef CIRCUITPY_RM690B0_X_GAP
-#define CIRCUITPY_RM690B0_X_GAP (0)
-#endif
-
-#ifndef CIRCUITPY_RM690B0_Y_GAP
-#define CIRCUITPY_RM690B0_Y_GAP (16)
-#endif
-
-#ifndef CIRCUITPY_RM690B0_PIXEL_CLOCK_HZ
-#define CIRCUITPY_RM690B0_PIXEL_CLOCK_HZ (80 * 1000 * 1000)
-#endif
-
-#define PIN_GPIO(pin_obj) ((pin_obj) == NULL ? (gpio_num_t)GPIO_NUM_NC : (gpio_num_t)(pin_obj)->number)
-
-#define LCD_CS_PIN          PIN_GPIO(CIRCUITPY_RM690B0_QSPI_CS)
-#define LCD_SCK_PIN         PIN_GPIO(CIRCUITPY_RM690B0_QSPI_CLK)
-#define LCD_D0_PIN          PIN_GPIO(CIRCUITPY_RM690B0_QSPI_D0)
-#define LCD_D1_PIN          PIN_GPIO(CIRCUITPY_RM690B0_QSPI_D1)
-#define LCD_D2_PIN          PIN_GPIO(CIRCUITPY_RM690B0_QSPI_D2)
-#define LCD_D3_PIN          PIN_GPIO(CIRCUITPY_RM690B0_QSPI_D3)
-#define LCD_RST_PIN         PIN_GPIO(CIRCUITPY_RM690B0_RESET)
-#define LCD_PWR_PIN         PIN_GPIO(CIRCUITPY_RM690B0_POWER)
-#define LCD_PWR_ON_LEVEL    (CIRCUITPY_RM690B0_POWER_ON_LEVEL)
-
-#define LCD_H_RES           (CIRCUITPY_RM690B0_WIDTH)
-#define LCD_V_RES           (CIRCUITPY_RM690B0_HEIGHT)
-#define LCD_BIT_PER_PIXEL   (CIRCUITPY_RM690B0_BITS_PER_PIXEL)
-#define LCD_USE_QSPI        (CIRCUITPY_RM690B0_USE_QSPI)
-#define LCD_PIXEL_CLOCK_HZ  (CIRCUITPY_RM690B0_PIXEL_CLOCK_HZ)
-
-#define RGB565_SWAP_GB(c) (__builtin_bswap16(c))
-
-#define RM690B0_OPCODE_WRITE_CMD   (0x02U)
-
-#define RM690B0_PANEL_WIDTH          LCD_H_RES
-#define RM690B0_PANEL_HEIGHT         LCD_V_RES
-#define RM690B0_X_GAP                (CIRCUITPY_RM690B0_X_GAP)
-#define RM690B0_Y_GAP                (CIRCUITPY_RM690B0_Y_GAP)
-#define RM690B0_MAX_CHUNK_ROWS       (32)  // Max safe value: 38.4 KB (34+ rows cause DMA errors)
-#define RM690B0_MAX_CHUNK_PIXELS     (LCD_H_RES * RM690B0_MAX_CHUNK_ROWS)
-#define RM690B0_MAX_DIAMETER         ((RM690B0_PANEL_WIDTH * 2) + 1)
-#define RM690B0_PANEL_IO_QUEUE_DEPTH (10)
-
-#define RM690B0_PENDING_BUFFER_FRAMEBUFFER   (0xFF)
-#define RM690B0_PENDING_BUFFER_ALLOC         (0xFE)
-#define RM690B0_PENDING_BUFFER_TEMP          (0xFD)
-
-// Built-in font identifiers (must match shared-bindings docs)
-#define RM690B0_FONT_8x8_MONO       (0)
-#define RM690B0_FONT_16x16_MONO     (1)
-#define RM690B0_FONT_16x24_MONO     (2)
-#define RM690B0_FONT_24x24_MONO     (3)
-#define RM690B0_FONT_24x32_MONO     (4)
-#define RM690B0_FONT_32x32_MONO     (5)
-#define RM690B0_FONT_32x48_MONO     (6)
-
-// Macro to check if display is initialized
-#define CHECK_INITIALIZED() \
-    do { \
-        if (!self->initialized) { \
-            mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Display not initialized. Call init_display() first")); \
-            return; \
-        } \
-    } while (0)
-
-// Internal implementation structure
-typedef struct {
-    mp_int_t top;
-    mp_int_t row_count;
-    int16_t *left;
-    int16_t *right;
-} rm690b0_span_accumulator_t;
-
-typedef struct {
-    size_t head;
-    size_t tail;
-    size_t count;
-    uint8_t ids[RM690B0_PANEL_IO_QUEUE_DEPTH];
-} rm690b0_dma_pending_list_t;
-
-#define RM690B0_MAX_DIRTY_RECTS  (8)
-
-typedef struct {
-    mp_int_t x, y, w, h;
-} rm690b0_dirty_rect_t;
-
-typedef struct rm690b0_impl {
-    esp_lcd_panel_io_handle_t io_handle;
-    esp_lcd_panel_handle_t panel_handle;
-    bool bus_initialized;
-    uint16_t *chunk_buffers[2];
-    size_t chunk_buffer_pixels;
-    uint16_t *framebuffer;
-    size_t framebuffer_pixels;
-    uint16_t *framebuffer_front;
-    bool double_buffered;
-    size_t dirty_count;
-    bool dirty_merged_valid;
-    mp_int_t dirty_merged_x, dirty_merged_y, dirty_merged_w, dirty_merged_h;
-    rm690b0_dirty_rect_t dirty_rects[RM690B0_MAX_DIRTY_RECTS];
-    SemaphoreHandle_t transfer_done_sem;
-    bool dma_buffer_in_use[2];
-    bool dma_alloc_buffer_in_use;
-    size_t dma_inflight;
-    rm690b0_dma_pending_list_t dma_pending;
-    int16_t *circle_span_cache;
-    size_t circle_span_capacity;
-} rm690b0_impl_t;
-typedef struct {
-    rm690b0_rm690b0_obj_t *self;
-    rm690b0_impl_t *impl;
-    mp_int_t origin_x;
-    mp_int_t origin_y;
-    mp_int_t clip_x;
-    mp_int_t clip_y;
-    mp_int_t clip_w;
-    mp_int_t clip_h;
-    bool rotation_zero;
-} rm690b0_jpeg_draw_ctx_t;
-
-
-static portMUX_TYPE rm690b0_spinlock = portMUX_INITIALIZER_UNLOCKED;
-
-static inline void rm690b0_dma_pending_init(rm690b0_dma_pending_list_t *list) {
-    list->head = 0;
-    list->tail = 0;
-    list->count = 0;
-}
-
-static inline void rm690b0_dma_pending_push(rm690b0_dma_pending_list_t *list, uint8_t id) {
-    portENTER_CRITICAL(&rm690b0_spinlock);
-    list->ids[list->tail] = id;
-    list->tail = (list->tail + 1) % RM690B0_PANEL_IO_QUEUE_DEPTH;
-    list->count++;
-    portEXIT_CRITICAL(&rm690b0_spinlock);
-}
-
-static inline uint8_t rm690b0_dma_pending_pop(rm690b0_dma_pending_list_t *list) {
-    portENTER_CRITICAL(&rm690b0_spinlock);
-    uint8_t id = list->ids[list->head];
-    list->head = (list->head + 1) % RM690B0_PANEL_IO_QUEUE_DEPTH;
-    list->count--;
-    portEXIT_CRITICAL(&rm690b0_spinlock);
-    return id;
-}
-
-static inline void rm690b0_wait_for_dma_completion(rm690b0_impl_t *impl) {
-    if (impl->dma_inflight == 0) {
-        return;
-    }
-
-    if (impl->transfer_done_sem) {
-        if (xSemaphoreTake(impl->transfer_done_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE("RM690B0", "DMA wait timeout! Halting to prevent memory corruption.");
-            mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("DMA transfer timed out - hardware requires reset"));
-            return;
-        }
-    } else {
-        // Fallback - should not happen because semaphore allocation is mandatory
-        esp_rom_delay_us(50);
-    }
-
-    if (impl->dma_inflight > 0) {
-        impl->dma_inflight--;
-    }
-
-    if (impl->dma_pending.count > 0) {
-        uint8_t id = rm690b0_dma_pending_pop(&impl->dma_pending);
-        if (id < 2) {
-            impl->dma_buffer_in_use[id] = false;
-        } else if (id == RM690B0_PENDING_BUFFER_ALLOC) {
-            impl->dma_alloc_buffer_in_use = false;
-        }
-        // RM690B0_PENDING_BUFFER_TEMP is explicitly ignored - it's locally managed
-    }
-
-}
-
-static inline void rm690b0_wait_for_dma_slot(rm690b0_impl_t *impl) {
-    while (impl->dma_inflight >= RM690B0_PANEL_IO_QUEUE_DEPTH) {
-        rm690b0_wait_for_dma_completion(impl);
-    }
-}
-
-static inline void rm690b0_wait_for_all_dma(rm690b0_impl_t *impl) {
-    while (impl->dma_inflight > 0) {
-        rm690b0_wait_for_dma_completion(impl);
-    }
-}
-
-// (rm690b0_text_state_t typedefs removed – not used yet)
-
-// Forward declarations for functions used by font rendering
-static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h);
-static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height);
-static void rm690b0_fill_rect_framebuffer(rm690b0_impl_t *impl,
-    mp_int_t bx, mp_int_t by, mp_int_t bw, mp_int_t bh, uint16_t swapped_color);
-
-// Callback for LCD IO transfer completion
-static bool IRAM_ATTR rm690b0_on_color_trans_done(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
+bool IRAM_ATTR rm690b0_on_color_trans_done(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
     rm690b0_impl_t *impl = (rm690b0_impl_t *)user_ctx;
     BaseType_t high_task_awoken = pdFALSE;
     xSemaphoreGiveFromISR(impl->transfer_done_sem, &high_task_awoken);
     return high_task_awoken == pdTRUE;
 }
 
+// ============================================================================
+// Cross-file helpers (non-inline, declared in rm690b0_internal.h)
+// ============================================================================
 
-
-static inline void rm690b0_span_update(rm690b0_span_accumulator_t *acc, mp_int_t row_y, mp_int_t x_val) {
+void rm690b0_span_update(rm690b0_span_accumulator_t *acc, mp_int_t row_y, mp_int_t x_val) {
     mp_int_t idx = row_y - acc->top;
     if (idx < 0 || idx >= acc->row_count) {
         return;
@@ -280,7 +43,7 @@ static inline void rm690b0_span_update(rm690b0_span_accumulator_t *acc, mp_int_t
     }
 }
 
-static inline int16_t *rm690b0_acquire_span_cache(rm690b0_impl_t *impl, size_t needed_rows) {
+int16_t *rm690b0_acquire_span_cache(rm690b0_impl_t *impl, size_t needed_rows) {
     if (impl == NULL || needed_rows == 0) {
         return NULL;
     }
@@ -301,655 +64,11 @@ static inline int16_t *rm690b0_acquire_span_cache(rm690b0_impl_t *impl, size_t n
     return impl->circle_span_cache;
 }
 
-static inline void rm690b0_fill_span_fast(uint16_t *dest, size_t span_width, uint16_t color) {
-    if (span_width == 0) {
-        return;
-    }
-
-    // Handle unaligned start pixel (not 32-bit aligned)
-    if (((uintptr_t)dest & 0x2) != 0) {
-        *dest++ = color;
-        span_width--;
-        if (span_width == 0) {
-            return;
-        }
-    }
-
-    // Fast 32-bit word writes: 2 pixels per operation
-    // Cast via uintptr_t: alignment is guaranteed by the & 0x2 check above
-    uint32_t color_word = ((uint32_t)color << 16) | color;
-    uint32_t *word_ptr = (uint32_t *)(uintptr_t)dest;
-    size_t word_count = span_width / 2;
-
-    while (word_count >= 4) {
-        word_ptr[0] = color_word;
-        word_ptr[1] = color_word;
-        word_ptr[2] = color_word;
-        word_ptr[3] = color_word;
-        word_ptr += 4;
-        word_count -= 4;
-    }
-    while (word_count > 0) {
-        *word_ptr++ = color_word;
-        word_count--;
-    }
-
-    // Handle remaining odd pixel
-    if (span_width & 1) {
-        *((uint16_t *)word_ptr) = color;
-    }
-}
-
-static bool map_rect_for_rotation(const rm690b0_rm690b0_obj_t *self,
-    mp_int_t *x, mp_int_t *y,
-    mp_int_t *width, mp_int_t *height) {
-    mp_int_t rx = *x;
-    mp_int_t ry = *y;
-    mp_int_t rw = *width;
-    mp_int_t rh = *height;
-
-    switch (self->rotation) {
-        case 0:
-            break;
-        case 90:
-            *x = RM690B0_PANEL_WIDTH - (ry + rh);
-            *y = rx;
-            *width = rh;
-            *height = rw;
-            break;
-        case 180:
-            *x = RM690B0_PANEL_WIDTH - (rx + rw);
-            *y = RM690B0_PANEL_HEIGHT - (ry + rh);
-            break;
-        case 270:
-            *x = ry;
-            *y = RM690B0_PANEL_HEIGHT - (rx + rw);
-            *width = rh;
-            *height = rw;
-            break;
-        default:
-            return false;
-    }
-
-    if (*width <= 0 || *height <= 0) {
-        return false;
-    }
-    return true;
-}
-
-// Helper function to safely check bitmap size and detect overflow
-// Uses 64-bit arithmetic to accurately detect overflow on both 32-bit and 64-bit systems
-static inline bool check_bitmap_size(size_t width, size_t height, size_t *out_bytes) {
-    // Use 64-bit arithmetic for accurate overflow detection
-    uint64_t pixels = (uint64_t)width * (uint64_t)height;
-    uint64_t bytes = pixels * sizeof(uint16_t);
-
-    // Check if result fits in size_t
-    if (bytes > SIZE_MAX) {
-        return false;
-    }
-
-    *out_bytes = (size_t)bytes;
-    return true;
-}
-
-static bool clip_logical_rect(const rm690b0_rm690b0_obj_t *self,
-    mp_int_t *x, mp_int_t *y,
-    mp_int_t *width, mp_int_t *height) {
-    if (*width <= 0 || *height <= 0) {
-        return false;
-    }
-
-    mp_int_t x0 = *x;
-    mp_int_t y0 = *y;
-    mp_int_t x1 = x0 + *width;
-    mp_int_t y1 = y0 + *height;
-
-    if (x1 <= 0 || y1 <= 0 || x0 >= self->width || y0 >= self->height) {
-        return false;
-    }
-
-    if (x0 < 0) {
-        x0 = 0;
-    }
-    if (y0 < 0) {
-        y0 = 0;
-    }
-    if (x1 > self->width) {
-        x1 = self->width;
-    }
-    if (y1 > self->height) {
-        y1 = self->height;
-    }
-
-    mp_int_t new_width = x1 - x0;
-    mp_int_t new_height = y1 - y0;
-    if (new_width <= 0 || new_height <= 0) {
-        return false;
-    }
-
-    *x = x0;
-    *y = y0;
-    *width = new_width;
-    *height = new_height;
-    return true;
-}
-
-static inline mp_int_t clamp_int(mp_int_t v, mp_int_t lo, mp_int_t hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-static inline bool rm690b0_prepare_draw(const rm690b0_rm690b0_obj_t *self,
-    mp_int_t *x, mp_int_t *y, mp_int_t *w, mp_int_t *h) {
-    return clip_logical_rect(self, x, y, w, h) &&
-           map_rect_for_rotation(self, x, y, w, h);
-}
-
-static inline esp_err_t rm690b0_finalize_draw(
-    rm690b0_rm690b0_obj_t *self, rm690b0_impl_t *impl,
-    mp_int_t phys_x, mp_int_t phys_y, mp_int_t phys_w, mp_int_t phys_h) {
-    mark_dirty_region(impl, phys_x, phys_y, phys_w, phys_h);
-    if (!impl->double_buffered) {
-        return rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
-    }
-    return ESP_OK;
-}
-
-// Compile-time assertions to ensure fallback character '?' exists in all fonts
-_Static_assert('?' >= 32 && '?' <= 127, "Fallback character '?' must be in font range");
-_Static_assert(sizeof(rm690b0_font_8x8_data) / sizeof(rm690b0_font_8x8_data[0]) == 96,
-    "Font 8x8 must have exactly 96 glyphs (0x20-0x7F)");
-_Static_assert(sizeof(rm690b0_font_16x16_data) / sizeof(rm690b0_font_16x16_data[0]) == 95,
-    "Font 16x16 must have exactly 95 glyphs (0x20-0x7E)");
-
-static inline const uint8_t *rm690b0_get_8x8_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7F (127) = 96 characters
-    if (codepoint < 32 || codepoint > 127) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 127]
-    }
-    // Safe array access: index range [0, 95]
-    return rm690b0_font_8x8_data[codepoint - 32];
-}
-
-static inline const uint8_t *rm690b0_get_16x16_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7E (126) = 95 characters
-    if (codepoint < 32 || codepoint > 126) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 126]
-    }
-    // Safe array access: index range [0, 94]
-    return rm690b0_font_16x16_data[codepoint - 32];
-}
-
-static inline const uint8_t *rm690b0_get_16x24_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7E (126) = 95 characters
-    if (codepoint < 32 || codepoint > 126) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 126]
-    }
-    // Safe array access: index range [0, 94]
-    return rm690b0_font_16x24_data[codepoint - 32];
-}
-
-static inline const uint8_t *rm690b0_get_24x24_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7E (126) = 95 characters
-    if (codepoint < 32 || codepoint > 126) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 126]
-    }
-    // Safe array access: index range [0, 94]
-    return rm690b0_font_24x24_data[codepoint - 32];
-}
-
-static inline const uint8_t *rm690b0_get_24x32_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7E (126) = 95 characters
-    if (codepoint < 32 || codepoint > 126) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 126]
-    }
-    // Safe array access: index range [0, 94]
-    return rm690b0_font_24x32_data[codepoint - 32];
-}
-
-static inline const uint8_t *rm690b0_get_32x32_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7E (126) = 95 characters
-    if (codepoint < 32 || codepoint > 126) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 126]
-    }
-    // Safe array access: index range [0, 94]
-    return rm690b0_font_32x32_data[codepoint - 32];
-}
-
-static inline const uint8_t *rm690b0_get_32x48_glyph(uint32_t codepoint) {
-    // Validate codepoint range and use fallback for invalid characters
-    // Font range: 0x20 (32) to 0x7E (126) = 95 characters
-    if (codepoint < 32 || codepoint > 126) {
-        codepoint = '?';  // ASCII 63, guaranteed to be in range [32, 126]
-    }
-    // Safe array access: index range [0, 94]
-    return rm690b0_font_32x48_data[codepoint - 32];
-}
-
 // ============================================================================
-// OPTIMIZED FONT RENDERING - Universal rotation-aware batch write
+// expand_even_region — 2-pixel alignment for RM690B0 hardware
 // ============================================================================
 
-static inline void rm690b0_map_point(const rm690b0_rm690b0_obj_t *self,
-    mp_int_t logical_x, mp_int_t logical_y,
-    mp_int_t *phys_x, mp_int_t *phys_y) {
-    switch (self->rotation) {
-        case 0:
-            *phys_x = logical_x;
-            *phys_y = logical_y;
-            break;
-        case 90:
-            *phys_x = RM690B0_PANEL_WIDTH - logical_y - 1;
-            *phys_y = logical_x;
-            break;
-        case 180:
-            *phys_x = RM690B0_PANEL_WIDTH - logical_x - 1;
-            *phys_y = RM690B0_PANEL_HEIGHT - logical_y - 1;
-            break;
-        case 270:
-            *phys_x = logical_y;
-            *phys_y = RM690B0_PANEL_HEIGHT - logical_x - 1;
-            break;
-        default:
-            *phys_x = logical_x;
-            *phys_y = logical_y;
-            break;
-    }
-}
-
-/**
- * Write a pixel to framebuffer with rotation support.
- * This inline helper handles all 4 rotations in one place.
- * Compiler will optimize this heavily for rotation=0 case.
- */
-static inline void rm690b0_write_pixel_rotated(
-    rm690b0_rm690b0_obj_t *self,
-    rm690b0_impl_t *impl,
-    mp_int_t logical_x, mp_int_t logical_y,
-    uint16_t color) {
-
-    mp_int_t phys_x, phys_y;
-    rm690b0_map_point(self, logical_x, logical_y, &phys_x, &phys_y);
-
-    if (phys_x < 0 || phys_x >= RM690B0_PANEL_WIDTH ||
-        phys_y < 0 || phys_y >= RM690B0_PANEL_HEIGHT) {
-        return;
-    }
-
-    impl->framebuffer[phys_y * RM690B0_PANEL_WIDTH + phys_x] = color;
-}
-
-
-// ============================================================================
-// UNIFIED GLYPH RENDERING - single impl for all font sizes
-// ============================================================================
-
-/**
- * Read one row of glyph bitmap as uint32_t.
- * bytes_per_row: 1 (8px wide), 2 (16px), 3 (24px), 4 (32px).
- * When called with a compile-time constant, GCC -O2 unrolls to hardcoded loads.
- */
-static inline uint32_t rm690b0_read_glyph_row(
-    const uint8_t *glyph, int row, int bytes_per_row) {
-    uint32_t bits = 0;
-    const uint8_t *p = glyph + row * bytes_per_row;
-    for (int i = 0; i < bytes_per_row; i++) {
-        bits = (bits << 8) | p[i];
-    }
-    return bits;
-}
-
-/**
- * Universal glyph renderer for all font sizes and all rotations.
- * glyph_w must be a multiple of 8 (8, 16, 24, 32).
- * Thin static-inline wrappers below pass compile-time constants,
- * allowing GCC to fully optimize the bit-read loop per font size.
- */
-static void rm690b0_draw_glyph_impl(
-    rm690b0_rm690b0_obj_t *self,
-    mp_int_t x, mp_int_t y,
-    const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush,
-    int glyph_w, int glyph_h) {
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    // Early exit: glyph completely off-screen
-    if (x >= self->width || y >= self->height ||
-        x + glyph_w <= 0 || y + glyph_h <= 0) {
-        return;
-    }
-
-    // Clipping bounds
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end   = (x + glyph_w > self->width)  ? (self->width  - x) : glyph_w;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end   = (y + glyph_h > self->height) ? (self->height - y) : glyph_h;
-
-    uint16_t fg_swapped = RGB565_SWAP_GB(fg);
-    uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
-
-    int bytes_per_row   = glyph_w / 8;
-    uint32_t top_bit    = 0x80000000u >> (32 - glyph_w);
-
-    const mp_int_t rot  = self->rotation;
-    size_t fb_stride    = RM690B0_PANEL_WIDTH;
-    uint16_t *fb_ptr    = impl->framebuffer;
-
-    if (rot == 0) {
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
-            size_t row_offset = (size_t)(y + row) * fb_stride + (x + col_start);
-            for (int col = col_start; col < col_end; col++) {
-                if (bits & (top_bit >> col)) {
-                    fb_ptr[row_offset + (col - col_start)] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[row_offset + (col - col_start)] = bg_swapped;
-                }
-            }
-        }
-    } else if (rot == 90) {
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
-            mp_int_t phys_x = RM690B0_PANEL_WIDTH - (y + row) - 1;
-            size_t start_index = (size_t)(x + col_start) * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                if (bits & (top_bit >> col)) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index += fb_stride;
-            }
-        }
-    } else if (rot == 180) {
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
-            mp_int_t phys_y = RM690B0_PANEL_HEIGHT - (y + row) - 1;
-            mp_int_t phys_x_start = RM690B0_PANEL_WIDTH - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y * fb_stride + phys_x_start;
-            for (int col = col_start; col < col_end; col++) {
-                if (bits & (top_bit >> col)) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index--;
-            }
-        }
-    } else if (rot == 270) {
-        for (int row = row_start; row < row_end; row++) {
-            uint32_t bits = rm690b0_read_glyph_row(glyph, row, bytes_per_row);
-            mp_int_t phys_x = y + row;
-            mp_int_t phys_y_start = RM690B0_PANEL_HEIGHT - (x + col_start) - 1;
-            size_t start_index = (size_t)phys_y_start * fb_stride + phys_x;
-            for (int col = col_start; col < col_end; col++) {
-                if (bits & (top_bit >> col)) {
-                    fb_ptr[start_index] = fg_swapped;
-                } else if (has_bg) {
-                    fb_ptr[start_index] = bg_swapped;
-                }
-                start_index -= fb_stride;
-            }
-        }
-    }
-
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = glyph_w, dirty_h = glyph_h;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y,
-                                                  dirty_w, dirty_h);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph flush failed: %s", esp_err_to_name(ret));
-            }
-        }
-    }
-}
-
-// Thin wrappers — pass compile-time constants so GCC can fully optimize impl
-static inline void rm690b0_draw_glyph_8x8(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 8, 8);
-}
-static inline void rm690b0_draw_glyph_16x16(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 16, 16);
-}
-static inline void rm690b0_draw_glyph_16x24(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 16, 24);
-}
-static inline void rm690b0_draw_glyph_24x24(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 24, 24);
-}
-static inline void rm690b0_draw_glyph_24x32(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 24, 32);
-}
-static inline void rm690b0_draw_glyph_32x32(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 32, 32);
-}
-static inline void rm690b0_draw_glyph_32x48(
-    rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 32, 48);
-}
-
-
-// NOTE: Text state is currently stateless per-instance in C; we use a static variable
-// for font id to avoid changing struct layout. 0 = 8x8 monospace.
-void common_hal_rm690b0_rm690b0_set_font(rm690b0_rm690b0_obj_t *self, mp_int_t font_id) {
-    // Clamp to known range
-    if (font_id < RM690B0_FONT_8x8_MONO || font_id > RM690B0_FONT_32x48_MONO) {
-        font_id = RM690B0_FONT_8x8_MONO;
-    }
-    // Store in object instance
-    self->font_id = font_id;
-}
-
-static inline mp_int_t rm690b0_get_current_font(const rm690b0_rm690b0_obj_t *self) {
-    return self->font_id;
-}
-
-// Helper function to get font dimensions (width, height) by font ID
-static inline void rm690b0_get_font_dims(mp_int_t font_id, mp_int_t *width, mp_int_t *height) {
-    switch (font_id) {
-        case RM690B0_FONT_16x16_MONO:
-            *width = 16;
-            *height = 16;
-            break;
-        case RM690B0_FONT_16x24_MONO:
-            *width = 16;
-            *height = 24;
-            break;
-        case RM690B0_FONT_24x24_MONO:
-            *width = 24;
-            *height = 24;
-            break;
-        case RM690B0_FONT_24x32_MONO:
-            *width = 24;
-            *height = 32;
-            break;
-        case RM690B0_FONT_32x32_MONO:
-            *width = 32;
-            *height = 32;
-            break;
-        case RM690B0_FONT_32x48_MONO:
-            *width = 32;
-            *height = 48;
-            break;
-        default: // RM690B0_FONT_8x8_MONO
-            *width = 8;
-            *height = 8;
-            break;
-    }
-}
-
-void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const char *text, size_t text_len, uint16_t fg, bool has_bg, uint16_t bg) {
-
-    CHECK_INITIALIZED();
-
-    if (text_len == 0) {
-        return;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    mp_int_t font_id = rm690b0_get_current_font(self);
-    mp_int_t cursor_x = x;
-    mp_int_t cursor_y = y;
-
-    // Determine font dimensions based on ID
-    mp_int_t font_width, font_height;
-    rm690b0_get_font_dims(font_id, &font_width, &font_height);
-
-    // Initialize bounding box for batch flushing
-    // min_x is always x because newlines reset cursor_x to x.
-    mp_int_t min_x = x;
-    mp_int_t max_x = x;
-    mp_int_t min_y = y;
-    mp_int_t max_y = y + font_height;
-
-    for (size_t i = 0; i < text_len; i++) {
-        uint8_t ch = (uint8_t)text[i];
-
-        if (ch == '\n') {
-            cursor_x = x;
-            cursor_y += font_height;
-            // Extend bounding box height to cover the new line
-            if (cursor_y + font_height > max_y) {
-                max_y = cursor_y + font_height;
-            }
-            continue;
-        } else if (ch == '\r') {
-            // Ignore carriage return
-            continue;
-        }
-
-        // Draw character based on font ID (no flush)
-        switch (font_id) {
-            case RM690B0_FONT_16x16_MONO: {
-                const uint8_t *glyph = rm690b0_get_16x16_glyph(ch);
-                rm690b0_draw_glyph_16x16(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-            case RM690B0_FONT_16x24_MONO: {
-                const uint8_t *glyph = rm690b0_get_16x24_glyph(ch);
-                rm690b0_draw_glyph_16x24(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-            case RM690B0_FONT_24x24_MONO: {
-                const uint8_t *glyph = rm690b0_get_24x24_glyph(ch);
-                rm690b0_draw_glyph_24x24(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-            case RM690B0_FONT_24x32_MONO: {
-                const uint8_t *glyph = rm690b0_get_24x32_glyph(ch);
-                rm690b0_draw_glyph_24x32(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-            case RM690B0_FONT_32x32_MONO: {
-                const uint8_t *glyph = rm690b0_get_32x32_glyph(ch);
-                rm690b0_draw_glyph_32x32(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-            case RM690B0_FONT_32x48_MONO: {
-                const uint8_t *glyph = rm690b0_get_32x48_glyph(ch);
-                rm690b0_draw_glyph_32x48(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-            default: { // RM690B0_FONT_8x8_MONO
-                const uint8_t *glyph = rm690b0_get_8x8_glyph(ch);
-                rm690b0_draw_glyph_8x8(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
-                break;
-            }
-        }
-        cursor_x += font_width;
-
-        // Update bounding box width
-        if (cursor_x > max_x) {
-            max_x = cursor_x;
-        }
-
-        if (cursor_x >= RM690B0_PANEL_WIDTH) {
-            cursor_x = x;
-            cursor_y += font_height;
-            if (cursor_y + font_height > max_y) {
-                max_y = cursor_y + font_height;
-            }
-        }
-        if (cursor_y >= RM690B0_PANEL_HEIGHT) {
-            break;
-        }
-    }
-
-    // Final flush of the entire text bounding box
-    if (!impl->double_buffered) {
-        mp_int_t dirty_x = min_x;
-        mp_int_t dirty_y = min_y;
-        mp_int_t dirty_w = max_x - min_x;
-        mp_int_t dirty_h = max_y - min_y;
-
-        if (dirty_w > 0 && dirty_h > 0) {
-            if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-                esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h);
-                if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Batch text flush failed: %s", esp_err_to_name(ret));
-                }
-            }
-        }
-    }
-}
-
-// Get current font width in pixels
-mp_int_t common_hal_rm690b0_rm690b0_get_font_width(rm690b0_rm690b0_obj_t *self) {
-    mp_int_t w, h;
-    rm690b0_get_font_dims(self->font_id, &w, &h);
-    return w;
-}
-
-// Get current font height in pixels
-mp_int_t common_hal_rm690b0_rm690b0_get_font_height(rm690b0_rm690b0_obj_t *self) {
-    mp_int_t w, h;
-    rm690b0_get_font_dims(self->font_id, &w, &h);
-    return h;
-}
-
-// Calculate pixel width of text string using current font
-// Newlines and carriage returns are not counted
-mp_int_t common_hal_rm690b0_rm690b0_get_text_width(rm690b0_rm690b0_obj_t *self, const char *text, size_t len) {
-    mp_int_t w, h;
-    rm690b0_get_font_dims(self->font_id, &w, &h);
-
-    // Count visible characters (exclude newlines and carriage returns)
-    size_t visible = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (text[i] != '\n' && text[i] != '\r') {
-            visible++;
-        }
-    }
-    return (mp_int_t)visible * w;
-}
-
-static bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int_t *height) {
+bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int_t *height) {
     mp_int_t start_x = *x;
     mp_int_t start_y = *y;
     mp_int_t end_x = start_x + *width;
@@ -1035,7 +154,9 @@ static bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int
     return true;
 }
 
-
+// ============================================================================
+// LCD init commands
+// ============================================================================
 
 static const rm690b0_lcd_init_cmd_t lcd_init_cmds[] = {
     {0xFE, (uint8_t []) {0x20}, 1, 0},
@@ -1056,10 +177,9 @@ static const rm690b0_lcd_init_cmd_t lcd_init_cmds[] = {
     {0x51, (uint8_t []) {0xFF}, 1, 0},
 };
 
-// rm690b0_impl_t structure is defined earlier in the file (before font rendering functions)
-
-// Singleton instance tracker for static deinit support
-static rm690b0_rm690b0_obj_t *rm690b0_singleton = NULL;
+// ============================================================================
+// tx_param helper
+// ============================================================================
 
 static esp_err_t rm690b0_tx_param(const rm690b0_impl_t *impl, uint8_t cmd, const void *param, size_t param_size) {
     if (impl == NULL || impl->io_handle == NULL) {
@@ -1070,13 +190,15 @@ static esp_err_t rm690b0_tx_param(const rm690b0_impl_t *impl, uint8_t cmd, const
     return esp_lcd_panel_io_tx_param(impl->io_handle, packed_cmd, param, param_size);
 }
 
-// Mark a region as dirty for next swap_buffers()
-static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h) {
+// ============================================================================
+// Dirty region tracking
+// ============================================================================
+
+void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h) {
     if (w <= 0 || h <= 0) {
         return;
     }
 
-    // Update merged bounds (union of all dirty rects - used as fallback)
     if (!impl->dirty_merged_valid) {
         impl->dirty_merged_x = x;
         impl->dirty_merged_y = y;
@@ -1094,13 +216,11 @@ static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_i
         impl->dirty_merged_h = y2 - impl->dirty_merged_y;
     }
 
-    // Try to add as new rect
     if (impl->dirty_count < RM690B0_MAX_DIRTY_RECTS) {
         impl->dirty_rects[impl->dirty_count++] = (rm690b0_dirty_rect_t){x, y, w, h};
         return;
     }
 
-    // Array full: merge with closest existing rect (center-to-center distance)
     size_t merge_idx = 0;
     mp_int_t min_dist = INT_MAX;
     mp_int_t cx = x + w / 2;
@@ -1124,7 +244,11 @@ static void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_i
     t->h = ((y + h > ty2) ? y + h : ty2) - t->y;
 }
 
-static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
+// ============================================================================
+// Flush region to display
+// ============================================================================
+
+esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height) {
 
     if (width <= 0 || height <= 0) {
@@ -1304,7 +428,6 @@ static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     }
 
     if (!use_static_buffers && alloc_buffer != NULL) {
-        // Ensure the last dynamic transfer is complete before freeing.
         while (impl->dma_alloc_buffer_in_use) {
             rm690b0_wait_for_dma_completion(impl);
         }
@@ -1317,15 +440,191 @@ static esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     return ret;
 }
 
+// ============================================================================
+// Framebuffer fill rect helper
+// ============================================================================
+
+// ============================================================================
+// Direct fill helpers (bypass framebuffer for single-buffer mode)
+// ============================================================================
+
+void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t color) {
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL || impl->panel_handle == NULL || impl->transfer_done_sem == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
+        return;
+    }
+
+    uint16_t swapped = RGB565_SWAP_GB(color);
+    size_t dma_lines = RM690B0_MAX_CHUNK_ROWS;
+    if (dma_lines > RM690B0_PANEL_HEIGHT) {
+        dma_lines = RM690B0_PANEL_HEIGHT;
+    }
+    const size_t line_pixels = RM690B0_PANEL_WIDTH;
+
+    uint16_t *dma_buffer = NULL;
+    bool allocated = false;
+
+    if (impl->chunk_buffers[0] != NULL && impl->chunk_buffer_pixels > 0) {
+        size_t max_lines = impl->chunk_buffer_pixels / line_pixels;
+        if (max_lines > 0 && max_lines < dma_lines) {
+            dma_lines = max_lines;
+        }
+        dma_buffer = impl->chunk_buffers[0];
+    } else {
+        const size_t dma_pixels = line_pixels * dma_lines;
+        const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
+        dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
+        if (dma_buffer == NULL) {
+            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("fill_color: unable to allocate DMA buffer"));
+            return;
+        }
+        allocated = true;
+    }
+
+    const size_t dma_pixels = line_pixels * dma_lines;
+    for (size_t i = 0; i < dma_pixels; i++) {
+        dma_buffer[i] = swapped;
+    }
+
+    size_t rows_remaining = RM690B0_PANEL_HEIGHT;
+    mp_int_t current_y = 0;
+    esp_err_t ret = ESP_OK;
+
+    while (rows_remaining > 0 && ret == ESP_OK) {
+        size_t rows_this_pass = rows_remaining > dma_lines ? dma_lines : rows_remaining;
+
+        rm690b0_wait_for_dma_slot(impl);
+
+        ret = esp_lcd_panel_draw_bitmap(
+            impl->panel_handle,
+            0,
+            current_y,
+            RM690B0_PANEL_WIDTH,
+            current_y + (mp_int_t)rows_this_pass,
+            dma_buffer);
+
+        if (ret != ESP_OK) {
+            break;
+        }
+
+        rm690b0_dma_pending_push(&impl->dma_pending, RM690B0_PENDING_BUFFER_TEMP);
+        impl->dma_inflight++;
+        current_y += (mp_int_t)rows_this_pass;
+        rows_remaining -= rows_this_pass;
+    }
+
+    rm690b0_wait_for_all_dma(impl);
+    if (ret == ESP_OK && impl->framebuffer != NULL) {
+        rm690b0_fill_rect_framebuffer(impl, 0, 0,
+            RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, swapped);
+        impl->dirty_count = 0;
+        impl->dirty_merged_valid = false;
+    }
+
+    if (allocated) {
+        heap_caps_free(dma_buffer);
+    }
+
+    if (ret != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("fill_color failed: %s"), esp_err_to_name(ret));
+    }
+}
+
+esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
+    mp_int_t start_y, mp_int_t rows, uint16_t swapped_color) {
+
+    if (rows <= 0) {
+        return ESP_OK;
+    }
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL || impl->panel_handle == NULL || impl->transfer_done_sem == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t dma_lines = RM690B0_MAX_CHUNK_ROWS;
+    if (dma_lines > (size_t)rows) {
+        dma_lines = rows;
+    }
+    const size_t line_pixels = RM690B0_PANEL_WIDTH;
+
+    uint16_t *dma_buffer = NULL;
+    bool allocated = false;
+
+    if (impl->chunk_buffers[0] != NULL && impl->chunk_buffer_pixels > 0) {
+        size_t max_lines = impl->chunk_buffer_pixels / line_pixels;
+        if (max_lines > 0 && max_lines < dma_lines) {
+            dma_lines = max_lines;
+        }
+        dma_buffer = impl->chunk_buffers[0];
+    } else {
+        const size_t dma_pixels = line_pixels * dma_lines;
+        const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
+        dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
+        if (dma_buffer == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        allocated = true;
+    }
+
+    const size_t dma_pixels = line_pixels * dma_lines;
+    for (size_t i = 0; i < dma_pixels; i++) {
+        dma_buffer[i] = swapped_color;
+    }
+
+    size_t rows_remaining = (size_t)rows;
+    mp_int_t current_y = start_y;
+    esp_err_t ret = ESP_OK;
+
+    while (rows_remaining > 0 && ret == ESP_OK) {
+        size_t rows_this_pass = rows_remaining > dma_lines ? dma_lines : rows_remaining;
+
+        rm690b0_wait_for_dma_slot(impl);
+
+        ret = esp_lcd_panel_draw_bitmap(
+            impl->panel_handle,
+            0,
+            current_y,
+            RM690B0_PANEL_WIDTH,
+            current_y + (mp_int_t)rows_this_pass,
+            dma_buffer);
+
+        if (ret != ESP_OK) {
+            break;
+        }
+
+        rm690b0_dma_pending_push(&impl->dma_pending, RM690B0_PENDING_BUFFER_TEMP);
+        impl->dma_inflight++;
+        current_y += (mp_int_t)rows_this_pass;
+        rows_remaining -= rows_this_pass;
+    }
+
+    rm690b0_wait_for_all_dma(impl);
+
+    if (allocated) {
+        heap_caps_free(dma_buffer);
+    }
+
+    if (ret == ESP_OK && impl->framebuffer != NULL) {
+        rm690b0_fill_rect_framebuffer(impl, 0, start_y, RM690B0_PANEL_WIDTH, rows, swapped_color);
+    }
+
+    return ret;
+}
+
+// ============================================================================
+// Lifecycle: construct, deinit, init_display
+// ============================================================================
+
 void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     self->initialized = false;
-    // Start in landscape mode (rotation 0) - display is 600x450
     self->width = RM690B0_PANEL_WIDTH;
     self->height = RM690B0_PANEL_HEIGHT;
     self->rotation = 0;
     self->brightness_raw = 0xFF;
-    self->font_id = RM690B0_FONT_8x8_MONO;  // Initialize with default font
-    self->buffer_mode = RM690B0_BUFFER_DOUBLE;  // default, overwritten by make_new
+    self->font_id = RM690B0_FONT_8x8_MONO;
+    self->buffer_mode = RM690B0_BUFFER_DOUBLE;
     self->impl = m_malloc(sizeof(rm690b0_impl_t));
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     impl->io_handle = NULL;
@@ -1341,11 +640,9 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     impl->circle_span_cache = NULL;
     impl->circle_span_capacity = 0;
 
-    // Initialize dirty region tracking
     impl->dirty_count = 0;
     impl->dirty_merged_valid = false;
 
-    // Create synchronization semaphore (counting, one slot per queued transfer)
     impl->transfer_done_sem = xSemaphoreCreateCounting(RM690B0_PANEL_IO_QUEUE_DEPTH, 0);
     if (impl->transfer_done_sem == NULL) {
         m_free(impl);
@@ -1358,14 +655,12 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     impl->dma_inflight = 0;
     rm690b0_dma_pending_init(&impl->dma_pending);
 
-    // Track this instance as the singleton
     rm690b0_singleton = self;
 
     ESP_LOGI(TAG, "RM690B0 module constructed");
 }
 
 void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
-    // Early safety checks
     if (!self) {
         ESP_LOGW(TAG, "deinit called with NULL self pointer");
         return;
@@ -1378,7 +673,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
 
     ESP_LOGI(TAG, "Starting RM690B0 deinit");
 
-    // Check if impl is valid
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     if (!impl) {
         ESP_LOGW(TAG, "deinit: impl pointer is NULL, nothing to free");
@@ -1389,26 +683,20 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         return;
     }
 
-    // Clear singleton reference
     if (rm690b0_singleton == self) {
         rm690b0_singleton = NULL;
     }
 
-    // Mark as uninitialized early to prevent re-entry
     self->initialized = false;
 
-    // Clear screen to black before freeing resources
     if (impl->panel_handle != NULL && impl->framebuffer != NULL) {
         ESP_LOGI(TAG, "Clearing display to black before deinit");
 
-        // Fill framebuffer with black
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
         memset(impl->framebuffer, 0, framebuffer_pixels * sizeof(uint16_t));
 
-        // Flush to display
         esp_err_t ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
         if (ret == ESP_OK) {
-            // Brief delay to ensure screen update completes
             rm690b0_wait_for_all_dma(impl);
             vTaskDelay(pdMS_TO_TICKS(10));
             ESP_LOGI(TAG, "Screen cleared successfully");
@@ -1417,7 +705,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         }
     }
 
-    // Free memory buffers
     rm690b0_wait_for_all_dma(impl);
 
     if (impl->framebuffer_front) {
@@ -1458,7 +745,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         impl->transfer_done_sem = NULL;
     }
 
-    // Turn off display power before freeing hardware resources
     if (LCD_PWR_PIN != GPIO_NUM_NC) {
         ESP_LOGI(TAG, "Turning off display power");
         int off_level = LCD_PWR_ON_LEVEL ? 0 : 1;
@@ -1466,7 +752,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 
-    // Delete LCD panel (must be before IO handle)
     if (impl->panel_handle != NULL) {
         ESP_LOGI(TAG, "Deleting LCD panel handle");
         esp_err_t ret = esp_lcd_panel_del(impl->panel_handle);
@@ -1476,7 +761,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         impl->panel_handle = NULL;
     }
 
-    // Delete LCD IO handle (must be before SPI bus)
     if (impl->io_handle != NULL) {
         ESP_LOGI(TAG, "Deleting LCD IO handle");
         esp_err_t ret = esp_lcd_panel_io_del(impl->io_handle);
@@ -1486,7 +770,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         impl->io_handle = NULL;
     }
 
-    // Free SPI bus (must be LAST, after all users are deleted)
     if (impl->bus_initialized) {
         ESP_LOGI(TAG, "Freeing SPI bus");
         esp_err_t ret = spi_bus_free(SPI2_HOST);
@@ -1496,14 +779,12 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         impl->bus_initialized = false;
     }
 
-    // Prevent use-after-free
     self->impl = NULL;
 
     ESP_LOGI(TAG, "RM690B0 deinit complete - all resources freed");
 }
 
 void common_hal_rm690b0_rm690b0_deinit_all(void) {
-    // Static deinit for REPL convenience - cleans up any active instance
     if (rm690b0_singleton != NULL) {
         ESP_LOGI(TAG, "Static deinit: cleaning up singleton instance");
         common_hal_rm690b0_rm690b0_deinit(rm690b0_singleton);
@@ -1514,7 +795,6 @@ void common_hal_rm690b0_rm690b0_deinit_all(void) {
     }
 }
 
-// Helper function to expose panel handle for LVGL integration
 esp_lcd_panel_handle_t rm690b0_get_panel_handle(void) {
     if (rm690b0_singleton == NULL) {
         ESP_LOGW(TAG, "rm690b0_get_panel_handle: no active display instance");
@@ -1543,7 +823,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
 
     ESP_LOGI(TAG, "Initializing RM690B0 display (%s mode)", LCD_USE_QSPI ? "QSPI" : "SPI");
 
-    // Enable display power if a dedicated control pin is provided
     if (LCD_PWR_PIN != GPIO_NUM_NC) {
         gpio_config_t io_conf = {
             .mode = GPIO_MODE_OUTPUT,
@@ -1559,17 +838,12 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
         ESP_LOGI(TAG, "No display power control pin configured; assuming panel is already powered");
     }
 
-    // Wait for power to stabilize (longer wait for display power-up)
     vTaskDelay(pdMS_TO_TICKS(200));
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     esp_err_t ret = ESP_OK;
 
     if (!impl->bus_initialized) {
-        // Initialize SPI bus using configuration macros from esp_lcd_rm690b0.h
-        // These macros correctly configure either QSPI (4 data lines) or standard SPI (1 data line)
-        // QSPI: Uses data0-data3 for 4-bit parallel data transfer (faster)
-        // SPI:  Uses mosi (data0) for single-bit serial data transfer (compatible)
         size_t max_transfer_bytes = RM690B0_MAX_CHUNK_PIXELS * sizeof(uint16_t);
         const spi_bus_config_t buscfg = LCD_USE_QSPI ?
             RM690B0_PANEL_BUS_QSPI_CONFIG(LCD_SCK_PIN, LCD_D0_PIN, LCD_D1_PIN, LCD_D2_PIN, LCD_D3_PIN, max_transfer_bytes) :
@@ -1583,12 +857,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
         ESP_LOGI(TAG, "%s bus initialized", LCD_USE_QSPI ? "QSPI" : "SPI");
     }
 
-    // Configure panel I/O layer using macros from esp_lcd_rm690b0.h
-    // These macros set up the correct communication protocol:
-    // - QSPI mode: 32-bit commands, no DC pin, quad_mode flag enabled
-    // - SPI mode:  8-bit commands, DC pin required, standard SPI
-    // Both use 8-bit parameters and 10-depth transaction queue
-    // We provide a callback to release the semaphore when transfer completes
     if (LCD_USE_QSPI) {
         const esp_lcd_panel_io_spi_config_t io_config = RM690B0_PANEL_IO_QSPI_CONFIG(LCD_CS_PIN, rm690b0_on_color_trans_done, impl, LCD_PIXEL_CLOCK_HZ);
         ret = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &impl->io_handle);
@@ -1605,7 +873,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "Panel I/O created");
 
-    // Configure vendor-specific settings for RM690B0
     rm690b0_vendor_config_t vendor_config = {
         .init_cmds = lcd_init_cmds,
         .init_cmds_size = sizeof(lcd_init_cmds) / sizeof(rm690b0_lcd_init_cmd_t),
@@ -1614,7 +881,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
         },
     };
 
-    // Configure panel device - exact configuration from board.c.old
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = LCD_RST_PIN,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
@@ -1637,7 +903,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "RM690B0 panel created");
 
-    // Initialize the display - exact sequence from board.c.old
     ret = esp_lcd_panel_reset(impl->panel_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to reset panel: %s", esp_err_to_name(ret));
@@ -1652,11 +917,9 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "Panel initialization complete");
 
-    // Set the gap after init - exact values from board.c.old
     esp_lcd_panel_set_gap(impl->panel_handle, RM690B0_X_GAP, RM690B0_Y_GAP);
     ESP_LOGI(TAG, "Display gap set to (0, 16)");
 
-    // Turn on the display
     ret = esp_lcd_panel_disp_on_off(impl->panel_handle, true);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to turn on display: %s", esp_err_to_name(ret));
@@ -1664,10 +927,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "Display turned on");
 
-    // Attempt to allocate static chunk buffers with a downgrade strategy
-    // Priority 1: Full size in Internal RAM (fastest) - unlikely for 450px wide high colors
-    // Priority 2: Full size in PSRAM (standard)
-    // Priority 3: Reduced size in Internal RAM or PSRAM
     if (impl->chunk_buffers[0] == NULL) {
         size_t current_chunk_rows = RM690B0_MAX_CHUNK_ROWS;
 
@@ -1675,24 +934,16 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             size_t buf_pixels = (size_t)RM690B0_PANEL_WIDTH * current_chunk_rows;
             size_t buf_size = buf_pixels * sizeof(uint16_t);
 
-            // Try explicit internal first for smaller sizes or just best effort caps?
-            // We use MALLOC_CAP_DMA which allows both internal and PSRAM, but
-            // heap_caps_malloc usually prefers internal if available and small enough.
-            // For large buffers, we might want to let it go to PSRAM to save internal for stack/heap.
-            // Let's rely on MALLOC_CAP_DMA.
-
             impl->chunk_buffers[0] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
             impl->chunk_buffers[1] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
 
             if (impl->chunk_buffers[0] != NULL && impl->chunk_buffers[1] != NULL) {
-                // Success
                 impl->chunk_buffer_pixels = buf_pixels;
                 ESP_LOGI(TAG, "Allocated dual DMA chunk buffers (%zu pixels each, %zu rows)",
                     impl->chunk_buffer_pixels, current_chunk_rows);
                 break;
             }
 
-            // Allocation failed, cleanup partial and try smaller
             if (impl->chunk_buffers[0]) {
                 heap_caps_free(impl->chunk_buffers[0]);
             }
@@ -1702,7 +953,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             impl->chunk_buffers[0] = NULL;
             impl->chunk_buffers[1] = NULL;
 
-            // Reduce size
             current_chunk_rows /= 2;
         }
 
@@ -1725,10 +975,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             framebuffer_pixels, (framebuffer_pixels * sizeof(uint16_t)) / 1024);
     }
 
-    // Front buffer will be allocated lazily on first swap_buffers() call
-    // This avoids 540KB memory overhead unless tear-free rendering is actually used
-
-    // Initialize back buffer with black
     for (size_t i = 0; i < framebuffer_pixels; i++) {
         impl->framebuffer[i] = 0x0000;
     }
@@ -1739,8 +985,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "Display filled with black");
 
-    // Pre-allocate span cache for circle rendering (eliminates realloc spikes)
-    // Cost: RM690B0_PANEL_HEIGHT * 2 * 2 bytes = 1.8 KB IRAM
     if (impl->circle_span_cache == NULL) {
         size_t max_span_rows = RM690B0_PANEL_HEIGHT;
         impl->circle_span_cache = (int16_t *)heap_caps_malloc(
@@ -1765,7 +1009,6 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     return;
 
 cleanup:
-    // Free resources in reverse order
     if (impl->chunk_buffers[0]) {
         heap_caps_free(impl->chunk_buffers[0]);
         impl->chunk_buffers[0] = NULL;
@@ -1776,7 +1019,6 @@ cleanup:
     }
     impl->chunk_buffer_pixels = 0;
 
-    // Panel handle must be valid if we got here (checked before reset/init)
     if (impl->panel_handle) {
         esp_lcd_panel_del(impl->panel_handle);
         impl->panel_handle = NULL;
@@ -1793,962 +1035,15 @@ cleanup:
     }
 
     if (ret == ESP_OK) {
-        // Must be memory error if ret is OK but we jumped to cleanup
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Display initialization failed: Out of memory"));
     } else {
         mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Display initialization failed: %s"), esp_err_to_name(ret));
     }
 }
 
-static void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t color) {
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->panel_handle == NULL || impl->transfer_done_sem == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    uint16_t swapped = RGB565_SWAP_GB(color);
-    size_t dma_lines = RM690B0_MAX_CHUNK_ROWS;
-    if (dma_lines > RM690B0_PANEL_HEIGHT) {
-        dma_lines = RM690B0_PANEL_HEIGHT;
-    }
-    const size_t line_pixels = RM690B0_PANEL_WIDTH;
-
-    // Prefer pre-allocated chunk_buffers over heap malloc to avoid fragmentation
-    uint16_t *dma_buffer = NULL;
-    bool allocated = false;
-
-    if (impl->chunk_buffers[0] != NULL && impl->chunk_buffer_pixels > 0) {
-        // Use static chunk buffer - adjust dma_lines to fit
-        size_t max_lines = impl->chunk_buffer_pixels / line_pixels;
-        if (max_lines > 0 && max_lines < dma_lines) {
-            dma_lines = max_lines;
-        }
-        dma_buffer = impl->chunk_buffers[0];
-    } else {
-        // Fallback: allocate from heap
-        const size_t dma_pixels = line_pixels * dma_lines;
-        const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
-        dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
-        if (dma_buffer == NULL) {
-            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("fill_color: unable to allocate DMA buffer"));
-            return;
-        }
-        allocated = true;
-    }
-
-    // Fill buffer with color
-    const size_t dma_pixels = line_pixels * dma_lines;
-    for (size_t i = 0; i < dma_pixels; i++) {
-        dma_buffer[i] = swapped;
-    }
-
-    size_t rows_remaining = RM690B0_PANEL_HEIGHT;
-    mp_int_t current_y = 0;
-    esp_err_t ret = ESP_OK;
-
-    while (rows_remaining > 0 && ret == ESP_OK) {
-        size_t rows_this_pass = rows_remaining > dma_lines ? dma_lines : rows_remaining;
-
-        // Wait for queue slot before submitting
-        rm690b0_wait_for_dma_slot(impl);
-
-        ret = esp_lcd_panel_draw_bitmap(
-            impl->panel_handle,
-            0,
-            current_y,
-            RM690B0_PANEL_WIDTH,
-            current_y + (mp_int_t)rows_this_pass,
-            dma_buffer);
-
-        if (ret != ESP_OK) {
-            break;
-        }
-
-        rm690b0_dma_pending_push(&impl->dma_pending, RM690B0_PENDING_BUFFER_TEMP);
-        impl->dma_inflight++;
-        current_y += (mp_int_t)rows_this_pass;
-        rows_remaining -= rows_this_pass;
-    }
-
-    rm690b0_wait_for_all_dma(impl);
-    if (ret == ESP_OK && impl->framebuffer != NULL) {
-        rm690b0_fill_rect_framebuffer(impl, 0, 0,
-            RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, swapped);
-        impl->dirty_count = 0;
-        impl->dirty_merged_valid = false;
-    }
-
-    // Only free if we allocated from heap
-    if (allocated) {
-        heap_caps_free(dma_buffer);
-    }
-
-    if (ret != ESP_OK) {
-        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("fill_color failed: %s"), esp_err_to_name(ret));
-    }
-}
-
-static esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
-    mp_int_t start_y, mp_int_t rows, uint16_t swapped_color) {
-
-    if (rows <= 0) {
-        return ESP_OK;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->panel_handle == NULL || impl->transfer_done_sem == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    size_t dma_lines = RM690B0_MAX_CHUNK_ROWS;
-    if (dma_lines > (size_t)rows) {
-        dma_lines = rows;
-    }
-    const size_t line_pixels = RM690B0_PANEL_WIDTH;
-
-    // Prefer pre-allocated chunk_buffers over heap malloc to avoid fragmentation
-    uint16_t *dma_buffer = NULL;
-    bool allocated = false;
-
-    if (impl->chunk_buffers[0] != NULL && impl->chunk_buffer_pixels > 0) {
-        // Use static chunk buffer - adjust dma_lines to fit
-        size_t max_lines = impl->chunk_buffer_pixels / line_pixels;
-        if (max_lines > 0 && max_lines < dma_lines) {
-            dma_lines = max_lines;
-        }
-        dma_buffer = impl->chunk_buffers[0];
-    } else {
-        // Fallback: allocate from heap
-        const size_t dma_pixels = line_pixels * dma_lines;
-        const size_t dma_bytes = dma_pixels * sizeof(uint16_t);
-        dma_buffer = heap_caps_malloc(dma_bytes, MALLOC_CAP_DMA);
-        if (dma_buffer == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
-        allocated = true;
-    }
-
-    // Fill buffer with color
-    const size_t dma_pixels = line_pixels * dma_lines;
-    for (size_t i = 0; i < dma_pixels; i++) {
-        dma_buffer[i] = swapped_color;
-    }
-
-    size_t rows_remaining = (size_t)rows;
-    mp_int_t current_y = start_y;
-    esp_err_t ret = ESP_OK;
-
-    while (rows_remaining > 0 && ret == ESP_OK) {
-        size_t rows_this_pass = rows_remaining > dma_lines ? dma_lines : rows_remaining;
-
-        rm690b0_wait_for_dma_slot(impl);
-
-        ret = esp_lcd_panel_draw_bitmap(
-            impl->panel_handle,
-            0,
-            current_y,
-            RM690B0_PANEL_WIDTH,
-            current_y + (mp_int_t)rows_this_pass,
-            dma_buffer);
-
-        if (ret != ESP_OK) {
-            break;
-        }
-
-        rm690b0_dma_pending_push(&impl->dma_pending, RM690B0_PENDING_BUFFER_TEMP);
-        impl->dma_inflight++;
-        current_y += (mp_int_t)rows_this_pass;
-        rows_remaining -= rows_this_pass;
-    }
-
-    rm690b0_wait_for_all_dma(impl);
-
-    // Only free if we allocated from heap
-    if (allocated) {
-        heap_caps_free(dma_buffer);
-    }
-
-    if (ret == ESP_OK && impl->framebuffer != NULL) {
-        rm690b0_fill_rect_framebuffer(impl, 0, start_y, RM690B0_PANEL_WIDTH, rows, swapped_color);
-    }
-
-    return ret;
-}
-
-void common_hal_rm690b0_rm690b0_fill_color(rm690b0_rm690b0_obj_t *self, uint16_t color) {
-    CHECK_INITIALIZED();
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl != NULL && !impl->double_buffered) {
-        rm690b0_fill_color_direct(self, color);
-        return;
-    }
-
-    common_hal_rm690b0_rm690b0_fill_rect(self, 0, 0, self->width, self->height, color);
-}
-
-void common_hal_rm690b0_rm690b0_pixel(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t color) {
-    // NOTE: In single-buffer mode (BUFFER_SINGLE), each pixel() call triggers an immediate
-    // DMA flush. For batch pixel operations, use fill_rect(x, y, 1, 1, color) which only
-    // marks the region as dirty without flushing until swap_buffers() is called.
-    CHECK_INITIALIZED();
-
-    mp_int_t bx = x;
-    mp_int_t by = y;
-    mp_int_t bw = 1;
-    mp_int_t bh = 1;
-
-    if (!rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
-        return;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    uint16_t swapped_color = RGB565_SWAP_GB(color);
-    impl->framebuffer[(size_t)by * RM690B0_PANEL_WIDTH + bx] = swapped_color;
-
-    esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-    if (ret != ESP_OK) {
-        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw pixel: %s"), esp_err_to_name(ret));
-    }
-}
-
-static void rm690b0_fill_rect_framebuffer(rm690b0_impl_t *impl,
-    mp_int_t bx, mp_int_t by, mp_int_t bw, mp_int_t bh, uint16_t swapped_color) {
-
-    uint16_t *base_ptr = impl->framebuffer + (size_t)by * RM690B0_PANEL_WIDTH + bx;
-
-    // Fill first row with 32-bit word writes
-    rm690b0_fill_span_fast(base_ptr, (size_t)bw, swapped_color);
-
-    mp_int_t filled_rows = 1;
-    size_t row_bytes = (size_t)bw * sizeof(uint16_t);
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
-
-    while (filled_rows < bh) {
-        mp_int_t rows_to_copy = filled_rows;
-        if (filled_rows + rows_to_copy > bh) {
-            rows_to_copy = bh - filled_rows;
-        }
-
-        for (mp_int_t i = 0; i < rows_to_copy; i++) {
-            uint16_t *src_row = base_ptr + (size_t)i * fb_stride;
-            uint16_t *dest_row = base_ptr + (size_t)(filled_rows + i) * fb_stride;
-            memcpy(dest_row, src_row, row_bytes);
-        }
-
-        filled_rows += rows_to_copy;
-    }
-}
-
-void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_int_t color) {
-    CHECK_INITIALIZED();
-
-    mp_int_t bx = x;
-    mp_int_t by = y;
-    mp_int_t bw = width;
-    mp_int_t bh = height;
-
-    if (!rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
-        return;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    uint16_t swapped_color = RGB565_SWAP_GB(color);
-
-    if (!impl->double_buffered && bx == 0 && bw == RM690B0_PANEL_WIDTH) {
-        esp_err_t direct_ret = rm690b0_fill_rect_direct_fullwidth(self, by, bh, swapped_color);
-        if (direct_ret == ESP_OK) {
-            mark_dirty_region(impl, bx, by, bw, bh);
-            return;
-        }
-        ESP_LOGW(TAG, "Full-width fast fill_rect path failed (%s) – falling back",
-            esp_err_to_name(direct_ret));
-    }
-
-    rm690b0_fill_rect_framebuffer(impl, bx, by, bw, bh, swapped_color);
-
-    esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-    if (ret != ESP_OK) {
-        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_rect: %s"), esp_err_to_name(ret));
-    }
-}
-
 // ============================================================================
-// IMAGE SUPPORT
+// Properties: rotation, brightness
 // ============================================================================
-
-#pragma pack(push, 1)
-typedef struct {
-    uint16_t type;             // Magic identifier: 0x4d42
-    uint32_t size;             // File size in bytes
-    uint16_t reserved1;
-    uint16_t reserved2;
-    uint32_t offset;           // Offset to image data in bytes from beginning of file
-    uint32_t header_size;      // Header size in bytes
-    int32_t width;             // Width of the image
-    int32_t height;            // Height of the image
-    uint16_t planes;           // Number of color planes
-    uint16_t bpp;              // Bits per pixel
-    uint32_t compression;      // Compression type
-    uint32_t image_size;       // Image size in bytes
-    int32_t x_res;             // Pixels per meter
-    int32_t y_res;             // Pixels per meter
-    uint32_t n_colors;         // Number of colors
-    uint32_t important_colors; // Important colors
-} bmp_header_t;
-#pragma pack(pop)
-
-void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_obj_t bmp_data) {
-    CHECK_INITIALIZED();
-
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(bmp_data, &bufinfo, MP_BUFFER_READ);
-
-    if (bufinfo.len < sizeof(bmp_header_t)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("BMP data too small"));
-        return;
-    }
-
-    const bmp_header_t *header = (const bmp_header_t *)bufinfo.buf;
-
-    if (header->type != 0x4D42) { // 'BM'
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP header"));
-        return;
-    }
-
-    if (header->bpp != 24 && header->bpp != 16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Only 16-bit and 24-bit BMP supported"));
-        return;
-    }
-
-    if (header->compression != 0 && header->compression != 3) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
-        return;
-    }
-
-    mp_int_t width = header->width;
-    mp_int_t height = abs(header->height);
-    bool top_down = (header->height < 0);
-    size_t data_offset = header->offset;
-
-    if (data_offset >= bufinfo.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
-        return;
-    }
-
-    // Clip to screen (logical coordinates)
-    mp_int_t clip_x = x;
-    mp_int_t clip_y = y;
-    mp_int_t clip_w = width;
-    mp_int_t clip_h = height;
-
-    if (!clip_logical_rect(self, &clip_x, &clip_y, &clip_w, &clip_h)) {
-        return;
-    }
-
-    // Calculate source offset based on clipping
-    mp_int_t x_offset = clip_x - x;
-    mp_int_t y_offset = clip_y - y;
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    const uint8_t *src_data = (const uint8_t *)bufinfo.buf + data_offset;
-
-    // BMP rows are padded to 4 bytes
-    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
-    int src_stride = width * (header->bpp / 8) + row_padding;
-
-    // Optimized path for rotation 0
-    if (self->rotation == 0) {
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        uint16_t *fb = impl->framebuffer;
-
-        for (int row = 0; row < clip_h; row++) {
-            // Source row calculation
-            int src_y = y_offset + row;
-            int src_row_idx = top_down ? src_y : (height - 1 - src_y);
-            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * (header->bpp / 8);
-
-            // Destination row
-            uint16_t *dst_ptr = fb + (size_t)(clip_y + row) * fb_stride + clip_x;
-
-            if (header->bpp == 24) {
-                for (int col = 0; col < clip_w; col++) {
-                    uint8_t b = row_ptr[col * 3];
-                    uint8_t g = row_ptr[col * 3 + 1];
-                    uint8_t r = row_ptr[col * 3 + 2];
-                    // Convert RGB888 to RGB565 (swapped for display)
-                    uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-                    dst_ptr[col] = RGB565_SWAP_GB(rgb);
-                }
-            } else { // 16-bit
-                for (int col = 0; col < clip_w; col++) {
-                    uint16_t val = row_ptr[col * 2] | (row_ptr[col * 2 + 1] << 8);
-                    dst_ptr[col] = RGB565_SWAP_GB(val);
-                }
-            }
-        }
-    } else {
-        // Rotated path (pixel by pixel, but clipped)
-        for (int row = 0; row < clip_h; row++) {
-            int src_y = y_offset + row;
-            int src_row_idx = top_down ? src_y : (height - 1 - src_y);
-            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * (header->bpp / 8);
-
-            for (int col = 0; col < clip_w; col++) {
-                uint16_t color565;
-                if (header->bpp == 24) {
-                    uint8_t b = row_ptr[col * 3];
-                    uint8_t g = row_ptr[col * 3 + 1];
-                    uint8_t r = row_ptr[col * 3 + 2];
-                    uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-                    color565 = RGB565_SWAP_GB(rgb);
-                } else {
-                    uint16_t val = row_ptr[col * 2] | (row_ptr[col * 2 + 1] << 8);
-                    color565 = RGB565_SWAP_GB(val);
-                }
-                rm690b0_write_pixel_rotated(self, impl, clip_x + col, clip_y + row, color565);
-            }
-        }
-    }
-
-    // Mark dirty region (clip_x/y already clipped, just need rotation mapping)
-    mp_int_t bx = clip_x, by = clip_y, bw = clip_w, bh = clip_h;
-    if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
-        esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-        if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw BMP: %s"), esp_err_to_name(ret));
-        }
-    }
-}
-
-static esp_err_t rm690b0_jpeg_on_block(intptr_t ctx_ptr,
-    uint32_t block_top, uint32_t block_left,
-    uint32_t block_bottom, uint32_t block_right,
-    const uint16_t *pixels) {
-
-    rm690b0_jpeg_draw_ctx_t *ctx = (rm690b0_jpeg_draw_ctx_t *)ctx_ptr;
-    rm690b0_impl_t *impl = ctx->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    mp_int_t dest_left = ctx->origin_x + (mp_int_t)block_left;
-    mp_int_t dest_top = ctx->origin_y + (mp_int_t)block_top;
-    mp_int_t dest_right = ctx->origin_x + (mp_int_t)block_right;
-    mp_int_t dest_bottom = ctx->origin_y + (mp_int_t)block_bottom;
-
-    mp_int_t clip_right = ctx->clip_x + ctx->clip_w - 1;
-    mp_int_t clip_bottom = ctx->clip_y + ctx->clip_h - 1;
-
-    mp_int_t draw_left = dest_left > ctx->clip_x ? dest_left : ctx->clip_x;
-    mp_int_t draw_top = dest_top > ctx->clip_y ? dest_top : ctx->clip_y;
-    mp_int_t draw_right = dest_right < clip_right ? dest_right : clip_right;
-    mp_int_t draw_bottom = dest_bottom < clip_bottom ? dest_bottom : clip_bottom;
-
-    if (draw_left > draw_right || draw_top > draw_bottom) {
-        return ESP_OK;
-    }
-
-    mp_int_t block_w = (mp_int_t)(block_right - block_left + 1);
-    if (block_w <= 0) {
-        return ESP_OK;
-    }
-
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
-
-    for (mp_int_t row = draw_top; row <= draw_bottom; row++) {
-        mp_int_t src_row = row - dest_top;
-        const uint16_t *row_src = pixels + (size_t)src_row * block_w + (draw_left - dest_left);
-
-        if (ctx->rotation_zero) {
-            uint16_t *dst = impl->framebuffer + (size_t)row * fb_stride + draw_left;
-            for (mp_int_t col = draw_left; col <= draw_right; col++) {
-                dst[col - draw_left] = RGB565_SWAP_GB(*row_src++);
-            }
-        } else {
-            for (mp_int_t col = draw_left; col <= draw_right; col++) {
-                uint16_t color = RGB565_SWAP_GB(*row_src++);
-                rm690b0_write_pixel_rotated(ctx->self, impl, col, row, color);
-            }
-        }
-    }
-
-    return ESP_OK;
-}
-
-
-void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_obj_t jpeg_data) {
-    CHECK_INITIALIZED();
-
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(jpeg_data, &bufinfo, MP_BUFFER_READ);
-
-    esp_jpeg_image_cfg_t jpeg_cfg = {
-        .indata = (uint8_t *)bufinfo.buf,
-        .indata_size = bufinfo.len,
-        .out_format = JPEG_IMAGE_FORMAT_RGB565,
-        .out_scale = JPEG_IMAGE_SCALE_0,
-        .flags = { .swap_color_bytes = 0 },  // Do not swap in decoder, we handle it manually
-        .outbuf = NULL,
-        .outbuf_size = 0,
-        .user_data = 0,
-        .on_block = NULL,
-    };
-
-    esp_jpeg_image_output_t jpeg_out;
-    esp_err_t ret = esp_jpeg_get_image_info(&jpeg_cfg, &jpeg_out);
-    if (ret != ESP_OK) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid JPEG data"));
-        return;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    int width = jpeg_out.width;
-    int height = jpeg_out.height;
-
-    // Clip to screen (logical coordinates)
-    mp_int_t clip_x = x;
-    mp_int_t clip_y = y;
-    mp_int_t clip_w = width;
-    mp_int_t clip_h = height;
-
-    if (clip_logical_rect(self, &clip_x, &clip_y, &clip_w, &clip_h)) {
-        rm690b0_jpeg_draw_ctx_t draw_ctx = {
-            .self = self,
-            .impl = impl,
-            .origin_x = x,
-            .origin_y = y,
-            .clip_x = clip_x,
-            .clip_y = clip_y,
-            .clip_w = clip_w,
-            .clip_h = clip_h,
-            .rotation_zero = (self->rotation == 0),
-        };
-
-        jpeg_cfg.user_data = (intptr_t)&draw_ctx;
-        jpeg_cfg.on_block = rm690b0_jpeg_on_block;
-
-        ret = esp_jpeg_decode(&jpeg_cfg, NULL);
-        if (ret != ESP_OK) {
-            mp_raise_ValueError(MP_ERROR_TEXT("JPEG decode failed"));
-            return;
-        }
-
-        // Mark dirty (clip_x/y already clipped, just need rotation mapping)
-        mp_int_t bx = clip_x, by = clip_y, bw = clip_w, bh = clip_h;
-        if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
-            esp_err_t flush_ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-            if (flush_ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw JPEG: %s"), esp_err_to_name(flush_ret));
-            }
-        }
-    }
-}
-
-void common_hal_rm690b0_rm690b0_hline(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t color) {
-    common_hal_rm690b0_rm690b0_fill_rect(self, x, y, width, 1, color);
-}
-
-void common_hal_rm690b0_rm690b0_vline(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t height, mp_int_t color) {
-    common_hal_rm690b0_rm690b0_fill_rect(self, x, y, 1, height, color);
-}
-
-//|     def blit_buffer(self, x: int, y: int, width: int, height: int, bitmap_data: bytearray, *, dest_is_swapped: bool = False) -> None:
-//|         """Draw a bitmap
-//|
-//|         :param int x: X coordinate of the top-left corner
-//|         :param int y: Y coordinate of the top-left corner
-//|         :param int width: Width of the bitmap
-//|         :param int height: Height of the bitmap
-//|         :param bytearray bitmap_data: Bitmap data (buffer protocol)
-//|         :param bool dest_is_swapped: If True, data is assumed to be in destination byte order (Big Endian) and will not be swapped.
-//|                                      Useful for JpegDecoder output which is already swapped. Default is False (Little Endian input).
-//|         """
-//|         ...
-//|
-
-
-void common_hal_rm690b0_rm690b0_rect(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_int_t color) {
-    common_hal_rm690b0_rm690b0_hline(self, x, y, width, color);
-    common_hal_rm690b0_rm690b0_hline(self, x, y + height - 1, width, color);
-    common_hal_rm690b0_rm690b0_vline(self, x, y, height, color);
-    common_hal_rm690b0_rm690b0_vline(self, x + width - 1, y, height, color);
-}
-
-static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, mp_int_t color) {
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        return;
-    }
-
-    uint16_t swapped_color = RGB565_SWAP_GB(color);
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
-
-    mp_int_t px0, py0, px1, py1;
-    rm690b0_map_point(self, x0, y0, &px0, &py0);
-    rm690b0_map_point(self, x1, y1, &px1, &py1);
-
-    mp_int_t pdx = labs(px1 - px0);
-    mp_int_t pdy = labs(py1 - py0);
-    mp_int_t sx = (px0 < px1) ? 1 : -1;
-    mp_int_t sy = (py0 < py1) ? 1 : -1;
-    mp_int_t err = pdx - pdy;
-
-    mp_int_t x = px0;
-    mp_int_t y = py0;
-    mp_int_t dirty_min_x = x, dirty_min_y = y;
-    mp_int_t dirty_max_x = x, dirty_max_y = y;
-
-    while (1) {
-        if (x < dirty_min_x) {
-            dirty_min_x = x;
-        }
-        if (x > dirty_max_x) {
-            dirty_max_x = x;
-        }
-        if (y < dirty_min_y) {
-            dirty_min_y = y;
-        }
-        if (y > dirty_max_y) {
-            dirty_max_y = y;
-        }
-
-        if (x >= 0 && x < RM690B0_PANEL_WIDTH && y >= 0 && y < RM690B0_PANEL_HEIGHT) {
-            impl->framebuffer[(size_t)y * fb_stride + x] = swapped_color;
-        }
-
-        if (x == px1 && y == py1) {
-            break;
-        }
-        mp_int_t e2 = 2 * err;
-        if (e2 > -pdy) {
-            err -= pdy;
-            x += sx;
-        }
-        if (e2 < pdx) {
-            err += pdx;
-            y += sy;
-        }
-    }
-
-    mp_int_t bx = dirty_min_x;
-    mp_int_t by = dirty_min_y;
-    mp_int_t bw = dirty_max_x - dirty_min_x + 1;
-    mp_int_t bh = dirty_max_y - dirty_min_y + 1;
-
-    if (bx < 0) {
-        bw += bx;
-        bx = 0;
-    }
-    if (by < 0) {
-        bh += by;
-        by = 0;
-    }
-    if (bx + bw > RM690B0_PANEL_WIDTH) {
-        bw = RM690B0_PANEL_WIDTH - bx;
-    }
-    if (by + bh > RM690B0_PANEL_HEIGHT) {
-        bh = RM690B0_PANEL_HEIGHT - by;
-    }
-
-    if (bw > 0 && bh > 0) {
-        rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-    }
-}
-
-void common_hal_rm690b0_rm690b0_line(rm690b0_rm690b0_obj_t *self, mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, mp_int_t color) {
-    CHECK_INITIALIZED();
-
-    if (x0 == x1) {
-        if (y1 < y0) {
-            mp_int_t tmp = y0;
-            y0 = y1;
-            y1 = tmp;
-        }
-        common_hal_rm690b0_rm690b0_vline(self, x0, y0, y1 - y0 + 1, color);
-        return;
-    }
-    if (y0 == y1) {
-        if (x1 < x0) {
-            mp_int_t tmp = x0;
-            x0 = x1;
-            x1 = tmp;
-        }
-        common_hal_rm690b0_rm690b0_hline(self, x0, y0, x1 - x0 + 1, color);
-        return;
-    }
-
-    mp_int_t dx = labs(x1 - x0);
-    mp_int_t dy = labs(y1 - y0);
-    mp_int_t line_length = (dx > dy) ? dx : dy;
-
-    const mp_int_t SPLIT_THRESHOLD = 100;
-    const mp_int_t TARGET_SEGMENT = 50;
-
-    if (line_length > SPLIT_THRESHOLD) {
-        mp_int_t num_segments = (line_length + TARGET_SEGMENT - 1) / TARGET_SEGMENT;
-        for (mp_int_t i = 0; i < num_segments; i++) {
-            mp_int_t seg_x0 = x0 + (x1 - x0) * i / num_segments;
-            mp_int_t seg_y0 = y0 + (y1 - y0) * i / num_segments;
-            mp_int_t seg_x1 = x0 + (x1 - x0) * (i + 1) / num_segments;
-            mp_int_t seg_y1 = y0 + (y1 - y0) * (i + 1) / num_segments;
-            rm690b0_draw_line_segment(self, seg_x0, seg_y0, seg_x1, seg_y1, color);
-        }
-        return;
-    }
-
-    rm690b0_draw_line_segment(self, x0, y0, x1, y1, color);
-}
-
-void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t radius, mp_int_t color) {
-    CHECK_INITIALIZED();
-    if (radius < 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("radius must be non-negative"));
-        return;
-    }
-    if (radius == 0) {
-        common_hal_rm690b0_rm690b0_pixel(self, x, y, color);
-        return;
-    }
-
-
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    uint16_t swapped_color = RGB565_SWAP_GB(color);
-
-    // Bresenham circle — write_pixel_rotated handles rotation + bounds check
-    mp_int_t x0 = 0;
-    mp_int_t y0 = radius;
-    mp_int_t d = 1 - radius;
-    while (x0 <= y0) {
-        rm690b0_write_pixel_rotated(self, impl, x + x0, y + y0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x - x0, y + y0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x + x0, y - y0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x - x0, y - y0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x + y0, y + x0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x - y0, y + x0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x + y0, y - x0, swapped_color);
-        rm690b0_write_pixel_rotated(self, impl, x - y0, y - x0, swapped_color);
-        x0 += 1;
-        if (d < 0) {
-            d += (x0 << 1) + 1;
-        } else {
-            y0 -= 1;
-            d += ((x0 - y0) << 1) + 1;
-        }
-    }
-
-    // Dirty region: logical bounding box → clip → rotate → physical
-    mp_int_t bx = x - radius;
-    mp_int_t by = y - radius;
-    mp_int_t bw = radius * 2 + 1;
-    mp_int_t bh = radius * 2 + 1;
-    if (rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
-        esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-        if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw circle: %s"), esp_err_to_name(ret));
-        }
-    }
-}
-
-void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t radius, mp_int_t color) {
-    CHECK_INITIALIZED();
-    if (radius < 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("radius must be non-negative"));
-        return;
-    }
-    if (radius == 0) {
-        common_hal_rm690b0_rm690b0_pixel(self, x, y, color);
-        return;
-    }
-
-
-    mp_int_t max_radius = (RM690B0_MAX_DIAMETER - 1) / 2;
-    if (radius > max_radius) {
-        radius = max_radius;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    mp_int_t top = y - radius;
-    mp_int_t row_count = radius * 2 + 1;
-    if (row_count <= 0) {
-        return;
-    }
-
-    mp_int_t bx = x - radius;
-    mp_int_t by = y - radius;
-    mp_int_t bw = row_count;
-    mp_int_t bh = row_count;
-    bool circle_fully_inside = (bx >= 0 && by >= 0 &&
-        bx + bw <= self->width && by + bh <= self->height);
-
-    #define STACK_ALLOC_THRESHOLD 128
-    int16_t left_stack[STACK_ALLOC_THRESHOLD];
-    int16_t right_stack[STACK_ALLOC_THRESHOLD];
-    int16_t *left = left_stack;
-    int16_t *right = right_stack;
-    int16_t *heap_span = NULL;
-
-    if (row_count > STACK_ALLOC_THRESHOLD) {
-        int16_t *cache = rm690b0_acquire_span_cache(impl, (size_t)row_count);
-        if (cache != NULL) {
-            left = cache;
-            right = cache + (mp_int_t)impl->circle_span_capacity;
-        } else {
-            size_t span_entries = (size_t)row_count * 2;
-            heap_span = (int16_t *)heap_caps_malloc(span_entries * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-            if (heap_span == NULL) {
-                mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate memory for circle"));
-                return;
-            }
-            left = heap_span;
-            right = heap_span + row_count;
-        }
-    }
-
-    for (mp_int_t i = 0; i < row_count; i++) {
-        left[i] = INT16_MAX;
-        right[i] = INT16_MIN;
-    }
-
-    rm690b0_span_accumulator_t acc = {
-        .top = top,
-        .row_count = row_count,
-        .left = left,
-        .right = right,
-    };
-
-    mp_int_t xi = 0;
-    mp_int_t yi = radius;
-    mp_int_t d = 1 - radius;
-
-    while (xi <= yi) {
-        rm690b0_span_update(&acc, y + yi, x + xi);
-        rm690b0_span_update(&acc, y + yi, x - xi);
-        rm690b0_span_update(&acc, y - yi, x + xi);
-        rm690b0_span_update(&acc, y - yi, x - xi);
-
-        if (yi != xi) {
-            rm690b0_span_update(&acc, y + xi, x + yi);
-            rm690b0_span_update(&acc, y + xi, x - yi);
-            rm690b0_span_update(&acc, y - xi, x + yi);
-            rm690b0_span_update(&acc, y - xi, x - yi);
-        }
-
-        xi += 1;
-        if (d < 0) {
-            d += (xi << 1) + 1;
-        } else {
-            yi -= 1;
-            d += ((xi - yi) << 1) + 1;
-        }
-    }
-
-    uint16_t swapped_color = RGB565_SWAP_GB(color);
-
-    if (self->rotation == 0) {
-        // Fast path — rotation 0: logical == physical, direct framebuffer spans
-        size_t fb_stride = RM690B0_PANEL_WIDTH;
-        if (circle_fully_inside) {
-            for (mp_int_t row = 0; row < row_count; row++) {
-                int16_t span_left = left[row];
-                int16_t span_right = right[row];
-                if (span_left > span_right) {
-                    continue;
-                }
-                mp_int_t yy = top + row;
-                size_t span_width = (size_t)(span_right - span_left + 1);
-                uint16_t *dest = impl->framebuffer + (size_t)yy * fb_stride + span_left;
-                rm690b0_fill_span_fast(dest, span_width, swapped_color);
-            }
-        } else {
-            for (mp_int_t row = 0; row < row_count; row++) {
-                int16_t span_left = left[row];
-                int16_t span_right = right[row];
-                if (span_left > span_right) {
-                    continue;
-                }
-                mp_int_t yy = top + row;
-                if (yy < 0 || yy >= self->height) {
-                    continue;
-                }
-                mp_int_t span_left_i = (mp_int_t)span_left;
-                mp_int_t span_right_i = (mp_int_t)span_right;
-                if (span_left_i < 0) {
-                    span_left_i = 0;
-                }
-                if (span_right_i >= self->width) {
-                    span_right_i = self->width - 1;
-                }
-                mp_int_t span_width = span_right_i - span_left_i + 1;
-                if (span_width <= 0) {
-                    continue;
-                }
-                uint16_t *dest = impl->framebuffer + (size_t)yy * fb_stride + span_left_i;
-                rm690b0_fill_span_fast(dest, (size_t)span_width, swapped_color);
-            }
-        }
-    } else {
-        // Rotation path: per-span clip → rotate → fill_rect_framebuffer
-        for (mp_int_t row = 0; row < row_count; row++) {
-            int16_t span_left_val = left[row];
-            int16_t span_right_val = right[row];
-            if (span_left_val > span_right_val) {
-                continue;
-            }
-            mp_int_t sx = (mp_int_t)span_left_val;
-            mp_int_t sy = top + row;
-            mp_int_t sw = (mp_int_t)(span_right_val - span_left_val + 1);
-            mp_int_t sh = 1;
-            if (!rm690b0_prepare_draw(self, &sx, &sy, &sw, &sh)) {
-                continue;
-            }
-            rm690b0_fill_rect_framebuffer(impl, sx, sy, sw, sh, swapped_color);
-        }
-    }
-
-    // Dirty region: logical bounding box → clip → rotate → physical
-    mp_int_t clip_bx = bx, clip_by = by, clip_bw = bw, clip_bh = bh;
-    if (rm690b0_prepare_draw(self, &clip_bx, &clip_by, &clip_bw, &clip_bh)) {
-        esp_err_t ret = rm690b0_finalize_draw(self, impl, clip_bx, clip_by, clip_bw, clip_bh);
-        if (ret != ESP_OK) {
-            if (heap_span != NULL) {
-                heap_caps_free(heap_span);
-            }
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_circle: %s"), esp_err_to_name(ret));
-        }
-    }
-
-    if (heap_span != NULL) {
-        heap_caps_free(heap_span);
-    }
-}
 
 void common_hal_rm690b0_rm690b0_set_rotation(rm690b0_rm690b0_obj_t *self, mp_int_t degrees) {
     CHECK_INITIALIZED();
@@ -2833,204 +1128,15 @@ mp_float_t common_hal_rm690b0_rm690b0_get_brightness(const rm690b0_rm690b0_obj_t
     return (mp_float_t)raw / 255.0f;
 }
 
-void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_obj_t bitmap_data, bool dest_is_swapped, mp_int_t transparent_color, mp_int_t src_x1, mp_int_t src_y1, mp_int_t src_x2, mp_int_t src_y2) {
-    CHECK_INITIALIZED();
-
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(bitmap_data, &bufinfo, MP_BUFFER_READ);
-
-    // Handle default src_x2/src_y2 values
-    if (src_x2 < 0) {
-        src_x2 = width;
-    }
-    if (src_y2 < 0) {
-        src_y2 = height;
-    }
-
-    // Validate source region
-    if (src_x1 < 0 || src_y1 < 0 || src_x2 > width || src_y2 > height || src_x1 >= src_x2 || src_y1 >= src_y2) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid source region (must be: 0 <= x1 < x2 <= width, 0 <= y1 < y2 <= height)"));
-        return;
-    }
-
-    // Calculate actual dimensions of the region we're copying
-    mp_int_t src_region_w = src_x2 - src_x1;
-    mp_int_t src_region_h = src_y2 - src_y1;
-
-    size_t src_width = (size_t)width;
-    size_t src_height = (size_t)height;
-
-    // Check for overflow in bitmap size calculation
-    size_t expected_bytes;
-    if (!check_bitmap_size(src_width, src_height, &expected_bytes)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Bitmap dimensions too large (max ~32767x32767 on 32-bit systems)"));
-        return;
-    }
-
-    if (bufinfo.len < expected_bytes) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Bitmap data too small for width * height"));
-        return;
-    }
-
-    // Logical coordinates are based on the source region dimensions
-    mp_int_t logical_x = x;
-    mp_int_t logical_y = y;
-    mp_int_t logical_w = src_region_w;
-    mp_int_t logical_h = src_region_h;
-
-    if (!clip_logical_rect(self, &logical_x, &logical_y, &logical_w, &logical_h)) {
-        return;
-    }
-
-    // Calculate crop offsets relative to the source region
-    mp_int_t crop_left = logical_x - x;
-    mp_int_t crop_top = logical_y - y;
-    if (crop_left < 0) {
-        crop_left = 0;
-    }
-    if (crop_top < 0) {
-        crop_top = 0;
-    }
-
-    mp_int_t phys_x = logical_x;
-    mp_int_t phys_y = logical_y;
-    mp_int_t phys_w = logical_w;
-    mp_int_t phys_h = logical_h;
-
-    if (!map_rect_for_rotation(self, &phys_x, &phys_y, &phys_w, &phys_h)) {
-        return;
-    }
-
-    if (phys_w <= 0 || phys_h <= 0) {
-        return;
-    }
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
-    const uint16_t *src_base = (const uint16_t *)bufinfo.buf;
-    size_t src_stride = src_width;
-    // Offset by src_x1, src_y1 to start at the source region, then add crop offsets
-    const uint16_t *src_pixels = src_base + (size_t)(src_y1 + crop_top) * src_stride + (size_t)(src_x1 + crop_left);
-
-    uint16_t *framebuffer = impl->framebuffer;
-    size_t fb_stride = RM690B0_PANEL_WIDTH;
-
-    // Determine if we have transparency enabled
-    bool has_transparency = (transparent_color >= 0 && transparent_color <= 0xFFFF);
-    uint16_t transp = (uint16_t)transparent_color;
-
-    // If source is already swapped (BE) and we need BE for display, we skip the swap.
-    // If source is normal (LE) and we need BE (display), we swap.
-    // Standard blit_buffer assumes LE input and swaps to BE.
-    // IF dest_is_swapped is TRUE, it means the SOURCE is already in destination format (BE).
-
-    switch (self->rotation) {
-        case 0:
-            for (mp_int_t row = 0; row < logical_h; row++) {
-                const uint16_t *src_row = src_pixels + (size_t)row * src_stride;
-                uint16_t *dst_row = framebuffer + (size_t)(phys_y + row) * fb_stride + phys_x;
-
-                // Fast path: no transparency and dest_is_swapped (can use memcpy)
-                if (!has_transparency && dest_is_swapped) {
-                    memcpy(dst_row, src_row, logical_w * sizeof(uint16_t));
-                } else {
-                    // Slow path: per-pixel copy with optional transparency check
-                    for (mp_int_t col = 0; col < logical_w; col++) {
-                        uint16_t val = src_row[col];
-
-                        // Skip transparent pixels
-                        if (has_transparency && val == transp) {
-                            continue;
-                        }
-
-                        dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
-                    }
-                }
-            }
-            break;
-        case 180:
-            for (mp_int_t row = 0; row < logical_h; row++) {
-                const uint16_t *src_row = src_pixels + (size_t)(logical_h - 1 - row) * src_stride;
-                uint16_t *dst_row = framebuffer + (size_t)(phys_y + row) * fb_stride + phys_x;
-                for (mp_int_t col = 0; col < logical_w; col++) {
-                    uint16_t val = src_row[logical_w - 1 - col];
-
-                    // Skip transparent pixels
-                    if (has_transparency && val == transp) {
-                        continue;
-                    }
-
-                    dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
-                }
-            }
-            break;
-        case 90: {
-            mp_int_t phys_h_rows = phys_h;
-            mp_int_t phys_w_cols = phys_w;
-            for (mp_int_t row = 0; row < phys_h_rows; row++) {
-                uint16_t *dst_row = framebuffer + (size_t)(phys_y + row) * fb_stride + phys_x;
-                for (mp_int_t col = 0; col < phys_w_cols; col++) {
-                    mp_int_t src_row_idx = logical_h - 1 - col;
-                    mp_int_t src_col_idx = row;
-                    const uint16_t *src_row = src_pixels + (size_t)src_row_idx * src_stride;
-                    uint16_t val = src_row[src_col_idx];
-
-                    // Skip transparent pixels
-                    if (has_transparency && val == transp) {
-                        continue;
-                    }
-
-                    dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
-                }
-            }
-            break;
-        }
-        case 270: {
-            mp_int_t phys_h_rows = phys_h;
-            mp_int_t phys_w_cols = phys_w;
-            for (mp_int_t row = 0; row < phys_h_rows; row++) {
-                uint16_t *dst_row = framebuffer + (size_t)(phys_y + row) * fb_stride + phys_x;
-                for (mp_int_t col = 0; col < phys_w_cols; col++) {
-                    mp_int_t src_row_idx = col;
-                    mp_int_t src_col_idx = logical_w - 1 - row;
-                    const uint16_t *src_row = src_pixels + (size_t)src_row_idx * src_stride;
-                    uint16_t val = src_row[src_col_idx];
-
-                    // Skip transparent pixels
-                    if (has_transparency && val == transp) {
-                        continue;
-                    }
-
-                    dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
-                }
-            }
-            break;
-        }
-        default:
-            mp_raise_ValueError(MP_ERROR_TEXT("Unsupported rotation"));
-            return;
-    }
-
-    esp_err_t ret = rm690b0_finalize_draw(self, impl, phys_x, phys_y, phys_w, phys_h);
-    if (ret != ESP_OK) {
-        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw bitmap: %s"), esp_err_to_name(ret));
-    }
-}
+// ============================================================================
+// swap_buffers
+// ============================================================================
 
 void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool copy) {
     CHECK_INITIALIZED();
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
-    // Lazy allocation: allocate front buffer on first call (skip if BUFFER_SINGLE requested)
     if (!impl->double_buffered && impl->framebuffer_front == NULL
         && self->buffer_mode != RM690B0_BUFFER_SINGLE) {
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
@@ -3039,20 +1145,17 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
 
         if (impl->framebuffer_front == NULL) {
             ESP_LOGW(TAG, "Unable to allocate front framebuffer - falling back to single-buffered refresh");
-            // Fall through to single-buffer mode below
         } else {
             impl->double_buffered = true;
             ESP_LOGI(TAG, "Allocated front framebuffer (%zu KB) - double-buffering enabled",
                 (framebuffer_pixels * sizeof(uint16_t)) / 1024);
 
-            // Copy current back buffer to front buffer so swap has valid data
             memcpy(impl->framebuffer_front, impl->framebuffer,
                 framebuffer_pixels * sizeof(uint16_t));
         }
     }
 
     if (!impl->double_buffered || impl->framebuffer_front == NULL) {
-        // Single-buffer mode: use dirty tracking if available, else full-screen flush
         if (impl->dirty_count > 0) {
             size_t individual_area = 0;
             for (size_t i = 0; i < impl->dirty_count; i++) {
@@ -3089,15 +1192,12 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         return;
     }
 
-    // Double-buffered mode: flush dirty region
-    // If no dirty region, flush everything
     mp_int_t flush_x = 0;
     mp_int_t flush_y = 0;
     mp_int_t flush_w = self->width;
     mp_int_t flush_h = self->height;
 
     if (impl->dirty_count > 0) {
-        // Calculate total area of individual rects vs merged rect
         size_t individual_area = 0;
         for (size_t i = 0; i < impl->dirty_count; i++) {
             individual_area += (size_t)impl->dirty_rects[i].w * (size_t)impl->dirty_rects[i].h;
@@ -3105,13 +1205,11 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         size_t merged_area = (size_t)impl->dirty_merged_w * (size_t)impl->dirty_merged_h;
 
         if (merged_area > individual_area * 3 / 2) {
-            // Sparse update: flush individual rects (fewer pixels transferred)
             for (size_t i = 0; i < impl->dirty_count; i++) {
                 rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
                 rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
             }
         } else {
-            // Dense update: flush merged rect (fewer DMA ops)
             flush_x = impl->dirty_merged_x;
             flush_y = impl->dirty_merged_y;
             flush_w = impl->dirty_merged_w;
@@ -3123,20 +1221,13 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
     }
 
-    // Now swap the buffer pointers
-    // After swap: framebuffer becomes the old front buffer (ready for new drawing)
-    //             framebuffer_front becomes the old back buffer (now being displayed)
     uint16_t *temp = impl->framebuffer_front;
     impl->framebuffer_front = impl->framebuffer;
     impl->framebuffer = temp;
 
-    // Reset dirty tracking after flush
     impl->dirty_count = 0;
     impl->dirty_merged_valid = false;
 
-    // Optionally copy front buffer to back buffer for incremental drawing
-    // Standard double-buffering: back buffer inherits current display content
-    // Skip copy for better performance when doing full redraws (animations)
     if (copy) {
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
         memcpy(impl->framebuffer, impl->framebuffer_front,
@@ -3144,81 +1235,5 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         ESP_LOGI(TAG, "Buffers swapped and back buffer updated");
     } else {
         ESP_LOGI(TAG, "Buffers swapped (no copy)");
-    }
-}
-
-void common_hal_rm690b0_rm690b0_convert_bmp(rm690b0_rm690b0_obj_t *self, mp_obj_t src_data, mp_obj_t dest_bitmap) {
-    mp_buffer_info_t src_info;
-    mp_get_buffer_raise(src_data, &src_info, MP_BUFFER_READ);
-
-    mp_buffer_info_t dest_info;
-    mp_get_buffer_raise(dest_bitmap, &dest_info, MP_BUFFER_WRITE);
-
-    if (src_info.len < sizeof(bmp_header_t)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("BMP data too small"));
-        return;
-    }
-
-    const bmp_header_t *header = (const bmp_header_t *)src_info.buf;
-
-    if (header->type != 0x4D42) { // 'BM'
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP header"));
-        return;
-    }
-
-    if (header->bpp != 24 && header->bpp != 16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Only 16-bit and 24-bit BMP supported"));
-        return;
-    }
-
-    if (header->compression != 0 && header->compression != 3) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
-        return;
-    }
-
-    mp_int_t width = header->width;
-    mp_int_t height = abs(header->height);
-    bool top_down = (header->height < 0);
-    size_t data_offset = header->offset;
-
-    if (data_offset >= src_info.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
-        return;
-    }
-    
-    // Check destination size implicitly by buffer length
-    // We assume the user created the bitmap correctly. We will not overflow the buffer.
-    size_t max_dest_pixels = dest_info.len / sizeof(uint16_t);
-    if ((size_t)(width * height) > max_dest_pixels) {
-         mp_raise_ValueError(MP_ERROR_TEXT("Destination bitmap too small"));
-         return;
-    }
-    
-    // Pointers
-    uint16_t *dest_buf = (uint16_t *)dest_info.buf;
-    const uint8_t *src_pixels = (const uint8_t *)src_info.buf + data_offset;
-    
-    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
-    int src_stride = width * (header->bpp / 8) + row_padding;
-    
-    for (int row = 0; row < height; row++) {
-         int src_row_idx = top_down ? row : (height - 1 - row);
-         const uint8_t *row_ptr = src_pixels + (size_t)src_row_idx * src_stride;
-         uint16_t *dst_row_ptr = dest_buf + (size_t)row * width; // Dense packing in Bitmap
-         
-         if (header->bpp == 24) {
-             for (int col = 0; col < width; col++) {
-                 uint8_t b = row_ptr[col * 3];
-                 uint8_t g = row_ptr[col * 3 + 1];
-                 uint8_t r = row_ptr[col * 3 + 2];
-                 uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-                 dst_row_ptr[col] = RGB565_SWAP_GB(rgb); 
-             }
-         } else {
-             for (int col = 0; col < width; col++) {
-                 uint16_t val = row_ptr[col * 2] | (row_ptr[col * 2 + 1] << 8);
-                 dst_row_ptr[col] = RGB565_SWAP_GB(val);
-             }
-         }
     }
 }
