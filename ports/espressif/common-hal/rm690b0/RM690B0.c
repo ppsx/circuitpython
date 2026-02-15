@@ -273,9 +273,19 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     size_t fw_sz = (size_t)fw;
     size_t fh_sz = (size_t)fh;
 
-    size_t available_pixels = RM690B0_MAX_CHUNK_PIXELS;
-    if (impl->chunk_buffers[0] != NULL) {
-        available_pixels = impl->chunk_buffer_pixels;
+    // Check if direct DMA from framebuffer is possible (full-width flush).
+    // Direct DMA avoids copying to chunk buffers entirely.
+    bool direct_dma = (fx == 0 && fw == RM690B0_PANEL_WIDTH && x == 0 && width == RM690B0_PANEL_WIDTH);
+
+    size_t available_pixels;
+    if (direct_dma) {
+        // Direct DMA: limited only by SPI bus max_transfer_sz, not chunk buffers.
+        available_pixels = RM690B0_MAX_CHUNK_PIXELS;
+    } else {
+        available_pixels = RM690B0_MAX_CHUNK_PIXELS;
+        if (impl->chunk_buffers[0] != NULL) {
+            available_pixels = impl->chunk_buffer_pixels;
+        }
     }
 
     size_t max_chunk_height = available_pixels / fw_sz;
@@ -300,22 +310,24 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
 
     size_t max_chunk_pixels = fw_sz * chunk_height;
 
-    bool use_static_buffers = (impl->chunk_buffers[0] != NULL &&
-        impl->chunk_buffers[1] != NULL &&
-        impl->chunk_buffer_pixels >= max_chunk_pixels);
-
+    bool use_static_buffers = false;
     uint16_t *alloc_buffer = NULL;
-    if (!use_static_buffers) {
-        alloc_buffer = heap_caps_malloc(max_chunk_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
-        if (alloc_buffer == NULL) {
-            return ESP_ERR_NO_MEM;
+    if (!direct_dma) {
+        use_static_buffers = (impl->chunk_buffers[0] != NULL &&
+            impl->chunk_buffers[1] != NULL &&
+            impl->chunk_buffer_pixels >= max_chunk_pixels);
+
+        if (!use_static_buffers) {
+            alloc_buffer = heap_caps_malloc(max_chunk_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
+            if (alloc_buffer == NULL) {
+                return ESP_ERR_NO_MEM;
+            }
         }
     }
 
     esp_err_t ret = ESP_OK;
     uint16_t *framebuffer = impl->framebuffer;
     int buf_idx = 0;
-    bool direct_dma = (fx == 0 && fw == RM690B0_PANEL_WIDTH && x == 0 && width == RM690B0_PANEL_WIDTH);
 
     for (mp_int_t start_y = fy; start_y < fy + fh && ret == ESP_OK; start_y += (mp_int_t)chunk_height) {
         size_t rows_this_chunk = (size_t)((fy + fh) - start_y);
@@ -1192,6 +1204,12 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         return;
     }
 
+    // Wait for any in-flight DMA from the previous swap to complete.
+    // With double buffering this is safe: previous DMA reads from the current
+    // front buffer while Python drew to the back buffer — no conflict.
+    // If draw time > DMA time (typical), this returns instantly.
+    rm690b0_wait_for_all_dma(impl);
+
     mp_int_t flush_x = 0;
     mp_int_t flush_y = 0;
     mp_int_t flush_w = self->width;
@@ -1217,10 +1235,12 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
             rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
         }
     } else {
-        ESP_LOGI(TAG, "Flushing full screen (no dirty region)");
         rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
     }
 
+    // Swap buffer pointers. DMA may still be in flight reading from the
+    // back buffer (which becomes the new front). Python draws to the new
+    // back buffer (old front) — different memory, no conflict.
     uint16_t *temp = impl->framebuffer_front;
     impl->framebuffer_front = impl->framebuffer;
     impl->framebuffer = temp;
@@ -1229,11 +1249,11 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     impl->dirty_merged_valid = false;
 
     if (copy) {
+        // Must wait for DMA to finish before copying — the front buffer
+        // is still being read by DMA.
+        rm690b0_wait_for_all_dma(impl);
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
         memcpy(impl->framebuffer, impl->framebuffer_front,
             framebuffer_pixels * sizeof(uint16_t));
-        ESP_LOGI(TAG, "Buffers swapped and back buffer updated");
-    } else {
-        ESP_LOGI(TAG, "Buffers swapped (no copy)");
     }
 }

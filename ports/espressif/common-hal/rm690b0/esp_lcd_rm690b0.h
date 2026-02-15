@@ -68,7 +68,7 @@ typedef struct {
         .dc_gpio_num = -1,                                              \
         .spi_mode = 0,                                                  \
         .pclk_hz = (clk_freq),                                          \
-        .trans_queue_depth = 10,                                        \
+        .trans_queue_depth = 16,                                        \
         .on_color_trans_done = (cb),                                    \
         .user_ctx = (cb_ctx),                                           \
         .lcd_cmd_bits = 32,                                             \
@@ -94,7 +94,7 @@ typedef struct {
         .dc_gpio_num = (dc),                                            \
         .spi_mode = 0,                                                  \
         .pclk_hz = (clk_freq),                                          \
-        .trans_queue_depth = 10,                                        \
+        .trans_queue_depth = 16,                                        \
         .on_color_trans_done = (cb),                                    \
         .user_ctx = (cb_ctx),                                           \
         .lcd_cmd_bits = 8,                                              \
