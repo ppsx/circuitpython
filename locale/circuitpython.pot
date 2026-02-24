@@ -978,6 +978,7 @@ msgstr ""
 
 #: ports/espressif/common-hal/busio/SPI.c
 #: ports/espressif/common-hal/canio/CAN.c
+#: ports/espressif/common-hal/qspibus/QSPIBus.c
 msgid "ESP-IDF memory allocation failed"
 msgstr ""
 
@@ -1063,10 +1064,6 @@ msgstr ""
 
 #: ports/espressif/common-hal/audioio/AudioOut.c
 msgid "Failed to create continuous channels: not found"
-msgstr ""
-
-#: ports/espressif/common-hal/qspibus/QSPIBus.c
-msgid "Failed to create semaphore"
 msgstr ""
 
 #: ports/espressif/common-hal/audioio/AudioOut.c
