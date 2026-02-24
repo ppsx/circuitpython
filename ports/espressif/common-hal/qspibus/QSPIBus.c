@@ -121,11 +121,7 @@ static void qspibus_send_command_bytes(
     if (self->inflight_transfers >= QSPI_DMA_BUFFER_COUNT) {
         if (!qspibus_wait_one_transfer_done(self, pdMS_TO_TICKS(QSPI_COLOR_TIMEOUT_MS))) {
             qspibus_reset_transfer_state(self);
-<<<<<<< HEAD
             mp_raise_OSError_msg(MP_ERROR_TEXT("Operation timed out"));
-=======
-            mp_raise_OSError_msg(MP_ERROR_TEXT("QSPI command timeout"));
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
         }
     }
 
@@ -133,11 +129,7 @@ static void qspibus_send_command_bytes(
     esp_err_t err = esp_lcd_panel_io_tx_param(self->io_handle, packed_cmd, data, len);
     if (err != ESP_OK) {
         qspibus_reset_transfer_state(self);
-<<<<<<< HEAD
         mp_raise_OSError_msg_varg(MP_ERROR_TEXT("%q failure: %d"), MP_QSTR_QSPI, (int)err);
-=======
-        mp_raise_OSError_msg_varg(MP_ERROR_TEXT("QSPI send failed: %d"), err);
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     }
 }
 
@@ -155,13 +147,8 @@ static void qspibus_send_color_bytes(
         qspibus_send_command_bytes(self, command, NULL, 0);
         return;
     }
-<<<<<<< HEAD
     if (self->dma_buffer_size == 0) {
         mp_raise_OSError_msg(MP_ERROR_TEXT("Could not allocate DMA capable buffer"));
-=======
-    if (data == NULL || self->dma_buffer_size == 0) {
-        mp_raise_OSError_msg(MP_ERROR_TEXT("QSPI DMA buffers unavailable"));
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     }
 
     // RAMWR must transition to RAMWRC for continued payload chunks.
@@ -170,7 +157,6 @@ static void qspibus_send_color_bytes(
     size_t remaining = len;
 
     while (remaining > 0) {
-<<<<<<< HEAD
         // inflight_transfers is only modified in task context (never from ISR),
         // so no atomic/critical section is needed. The ISR only signals the
         // counting semaphore; all counter bookkeeping happens task-side.
@@ -178,12 +164,6 @@ static void qspibus_send_color_bytes(
             if (!qspibus_wait_one_transfer_done(self, pdMS_TO_TICKS(QSPI_COLOR_TIMEOUT_MS))) {
                 qspibus_reset_transfer_state(self);
                 mp_raise_OSError_msg(MP_ERROR_TEXT("Operation timed out"));
-=======
-        if (self->inflight_transfers >= QSPI_DMA_BUFFER_COUNT) {
-            if (!qspibus_wait_one_transfer_done(self, pdMS_TO_TICKS(QSPI_COLOR_TIMEOUT_MS))) {
-                qspibus_reset_transfer_state(self);
-                mp_raise_OSError_msg(MP_ERROR_TEXT("QSPI color timeout"));
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
             }
         }
 
@@ -199,11 +179,7 @@ static void qspibus_send_color_bytes(
         esp_err_t err = esp_lcd_panel_io_tx_color(self->io_handle, packed_cmd, buffer, chunk);
         if (err != ESP_OK) {
             qspibus_reset_transfer_state(self);
-<<<<<<< HEAD
             mp_raise_OSError_msg_varg(MP_ERROR_TEXT("%q failure: %d"), MP_QSTR_QSPI, (int)err);
-=======
-            mp_raise_OSError_msg_varg(MP_ERROR_TEXT("QSPI send color failed: %d"), err);
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
         }
 
         self->inflight_transfers++;
@@ -218,20 +194,11 @@ static void qspibus_send_color_bytes(
         remaining -= chunk;
     }
 
-<<<<<<< HEAD
     // Let DMA complete asynchronously. The next begin_transaction() will
     // wait for all in-flight transfers, allowing fill_area() computation
     // to overlap with DMA.  The explicit wait is only needed for the
     // Python write_data() API path where callers expect the transfer to
     // be finished on return.
-=======
-    // Keep Python/API semantics predictable: color transfer call returns only
-    // after queued DMA chunks have completed.
-    if (!qspibus_wait_all_transfers_done(self, pdMS_TO_TICKS(QSPI_COLOR_TIMEOUT_MS))) {
-        qspibus_reset_transfer_state(self);
-        mp_raise_OSError_msg(MP_ERROR_TEXT("QSPI color timeout"));
-    }
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
 }
 
 static bool qspibus_is_color_payload_command(uint8_t command) {
@@ -319,21 +286,13 @@ void common_hal_qspibus_qspibus_construct(
 
     self->transfer_done_sem = xSemaphoreCreateCounting(QSPI_DMA_BUFFER_COUNT, 0);
     if (self->transfer_done_sem == NULL) {
-<<<<<<< HEAD
-        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("ESP-IDF memory allocation failed"));
-=======
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to create semaphore"));
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     }
 
     if (!qspibus_allocate_dma_buffers(self)) {
         vSemaphoreDelete(self->transfer_done_sem);
         self->transfer_done_sem = NULL;
-<<<<<<< HEAD
         mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Could not allocate DMA capable buffer"));
-=======
-        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate DMA buffers"));
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     }
 
     const spi_bus_config_t bus_config = {
@@ -351,11 +310,7 @@ void common_hal_qspibus_qspibus_construct(
         qspibus_release_dma_buffers(self);
         vSemaphoreDelete(self->transfer_done_sem);
         self->transfer_done_sem = NULL;
-<<<<<<< HEAD
         mp_raise_OSError_msg_varg(MP_ERROR_TEXT("%q failure: %d"), MP_QSTR_SPI, (int)err);
-=======
-        mp_raise_OSError_msg_varg(MP_ERROR_TEXT("SPI bus init failed: %d"), err);
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     }
 
     const esp_lcd_panel_io_spi_config_t io_config = {
@@ -379,11 +334,7 @@ void common_hal_qspibus_qspibus_construct(
         qspibus_release_dma_buffers(self);
         vSemaphoreDelete(self->transfer_done_sem);
         self->transfer_done_sem = NULL;
-<<<<<<< HEAD
         mp_raise_OSError_msg_varg(MP_ERROR_TEXT("%q failure: %d"), MP_QSTR_QSPI, (int)err);
-=======
-        mp_raise_OSError_msg_varg(MP_ERROR_TEXT("Panel IO init failed: %d"), err);
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     }
 
     claim_pin(clock);
@@ -476,8 +427,6 @@ bool common_hal_qspibus_qspibus_deinited(qspibus_qspibus_obj_t *self) {
     return !self->bus_initialized;
 }
 
-<<<<<<< HEAD
-=======
 void common_hal_qspibus_qspibus_send_command(
     qspibus_qspibus_obj_t *self,
     uint8_t command,
@@ -487,7 +436,6 @@ void common_hal_qspibus_qspibus_send_command(
 }
 
 
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
 void common_hal_qspibus_qspibus_write_command(
     qspibus_qspibus_obj_t *self,
     uint8_t command) {
@@ -525,19 +473,12 @@ void common_hal_qspibus_qspibus_write_data(
         }
         return;
     }
-<<<<<<< HEAD
-=======
-    if (data == NULL) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Data buffer is null"));
-    }
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
-    if (!self->has_pending_command) {
+   if (!self->has_pending_command) {
         mp_raise_ValueError(MP_ERROR_TEXT("No pending command"));
     }
 
     if (qspibus_is_color_payload_command(self->pending_command)) {
         qspibus_send_color_bytes(self, self->pending_command, data, len);
-<<<<<<< HEAD
         // Python API: wait for DMA to finish so callers see the transfer as
         // complete on return. The internal displayio path skips this wait
         // to allow fill_area/DMA overlap.
@@ -545,8 +486,6 @@ void common_hal_qspibus_qspibus_write_data(
             qspibus_reset_transfer_state(self);
             mp_raise_OSError_msg(MP_ERROR_TEXT("Operation timed out"));
         }
-=======
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     } else {
         qspibus_send_command_bytes(self, self->pending_command, data, len);
     }
@@ -573,7 +512,6 @@ bool common_hal_qspibus_qspibus_bus_free(mp_obj_t obj) {
 
 bool common_hal_qspibus_qspibus_begin_transaction(mp_obj_t obj) {
     qspibus_qspibus_obj_t *self = MP_OBJ_TO_PTR(obj);
-<<<<<<< HEAD
     if (!self->bus_initialized || self->in_transaction || self->has_pending_command) {
         return false;
     }
@@ -589,14 +527,6 @@ bool common_hal_qspibus_qspibus_begin_transaction(mp_obj_t obj) {
         }
     }
     self->in_transaction = true;
-=======
-    if (!self->bus_initialized || self->in_transaction) {
-        return false;
-    }
-    self->in_transaction = true;
-    self->has_pending_command = false;
-    self->pending_command = 0;
->>>>>>> 4f993208dd (QSPI bus driver and RM690B0 display driver for Waveshare ESP32-S3 AMOLED 2.41)
     return true;
 }
 
