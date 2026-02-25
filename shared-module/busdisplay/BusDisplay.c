@@ -352,7 +352,7 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
         // Ensure at least 2 rows per buffer when possible.
         if (rows_per_buffer < 2 &&
             displayio_area_height(&clipped) > 1 &&
-            (2 * displayio_area_width(&clipped) + pixels_per_word - 1) / pixels_per_word <= (qspi_use_heap ? self->qspi_pixel_buffer_size : (uint32_t)CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE)) {
+            (uint32_t)((2 * displayio_area_width(&clipped) + pixels_per_word - 1) / pixels_per_word) <= (qspi_use_heap ? self->qspi_pixel_buffer_size : (uint32_t)CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE)) {
             rows_per_buffer = 2;
             subrectangles = displayio_area_height(&clipped) / rows_per_buffer;
             if (displayio_area_height(&clipped) % rows_per_buffer != 0) {
