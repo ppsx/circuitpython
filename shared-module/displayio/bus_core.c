@@ -101,6 +101,116 @@ void displayio_display_bus_end_transaction(displayio_display_bus_t *self) {
     self->end_transaction(self->bus);
 }
 
+// Send column/row window commands. Caller must already be in a transaction.
+void displayio_display_bus_send_region_commands(displayio_display_bus_t *self, displayio_display_core_t *display, displayio_area_t *area) {
+    uint16_t x1 = area->x1 + self->colstart;
+    uint16_t x2 = area->x2 + self->colstart;
+    uint16_t y1 = area->y1 + self->rowstart;
+    uint16_t y2 = area->y2 + self->rowstart;
+
+    // Collapse down the dimension where multiple pixels are in a byte.
+    if (display->colorspace.depth < 8) {
+        uint8_t pixels_per_byte = 8 / display->colorspace.depth;
+        if (display->colorspace.pixels_in_byte_share_row) {
+            x1 /= pixels_per_byte * display->colorspace.bytes_per_cell;
+            x2 /= pixels_per_byte * display->colorspace.bytes_per_cell;
+        } else {
+            y1 /= pixels_per_byte * display->colorspace.bytes_per_cell;
+            y2 /= pixels_per_byte * display->colorspace.bytes_per_cell;
+        }
+    }
+
+    x2 -= 1;
+    y2 -= 1;
+
+    display_chip_select_behavior_t chip_select = CHIP_SELECT_UNTOUCHED;
+    if (self->always_toggle_chip_select || self->data_as_commands) {
+        chip_select = CHIP_SELECT_TOGGLE_EVERY_BYTE;
+    }
+
+    // Set column.
+    uint8_t data[5];
+    data[0] = self->column_command;
+    uint8_t data_length = 1;
+    display_byte_type_t data_type = DISPLAY_DATA;
+    if (!self->data_as_commands) {
+        self->send(self->bus, DISPLAY_COMMAND, CHIP_SELECT_UNTOUCHED, data, 1);
+        data_length = 0;
+    } else {
+        data_type = DISPLAY_COMMAND;
+    }
+
+    if (self->ram_width < 0x100) {
+        data[data_length++] = x1;
+        data[data_length++] = x2;
+    } else {
+        if (self->address_little_endian) {
+            x1 = __builtin_bswap16(x1);
+            x2 = __builtin_bswap16(x2);
+        }
+        data[data_length++] = x1 >> 8;
+        data[data_length++] = x1 & 0xff;
+        data[data_length++] = x2 >> 8;
+        data[data_length++] = x2 & 0xff;
+    }
+
+    // Quirk for SH1107 "SH1107_addressing"
+    //     Column lower command = 0x00, Column upper command = 0x10
+    if (self->SH1107_addressing) {
+        data[0] = ((x1 >> 4) & 0x0F) | 0x10; // 0x10 to 0x17
+        data[1] = x1 & 0x0F; // 0x00 to 0x0F
+        data_length = 2;
+    }
+
+    self->send(self->bus, data_type, chip_select, data, data_length);
+
+    if (self->set_current_column_command != NO_COMMAND) {
+        uint8_t command = self->set_current_column_command;
+        self->send(self->bus, DISPLAY_COMMAND, chip_select, &command, 1);
+        // Only send the first half of data because it is the first coordinate.
+        self->send(self->bus, DISPLAY_DATA, chip_select, data, data_length / 2);
+    }
+
+    // Set row.
+    data[0] = self->row_command;
+    data_length = 1;
+    if (!self->data_as_commands) {
+        self->send(self->bus, DISPLAY_COMMAND, CHIP_SELECT_UNTOUCHED, data, 1);
+        data_length = 0;
+    }
+
+    if (self->ram_height < 0x100) {
+        data[data_length++] = y1;
+        data[data_length++] = y2;
+    } else {
+        if (self->address_little_endian) {
+            y1 = __builtin_bswap16(y1);
+            y2 = __builtin_bswap16(y2);
+        }
+        data[data_length++] = y1 >> 8;
+        data[data_length++] = y1 & 0xff;
+        data[data_length++] = y2 >> 8;
+        data[data_length++] = y2 & 0xff;
+    }
+
+    // Quirk for SH1107 "SH1107_addressing"
+    //     Page address command = 0xB0
+    if (self->SH1107_addressing) {
+        // set the page to our y value
+        data[0] = 0xB0 | y1;
+        data_length = 1;
+    }
+
+    self->send(self->bus, data_type, chip_select, data, data_length);
+
+    if (self->set_current_row_command != NO_COMMAND) {
+        uint8_t command = self->set_current_row_command;
+        self->send(self->bus, DISPLAY_COMMAND, chip_select, &command, 1);
+        // Only send the first half of data because it is the first coordinate.
+        self->send(self->bus, DISPLAY_DATA, chip_select, data, data_length / 2);
+    }
+}
+
 void displayio_display_bus_set_region_to_update(displayio_display_bus_t *self, displayio_display_core_t *display, displayio_area_t *area) {
     uint16_t x1 = area->x1 + self->colstart;
     uint16_t x2 = area->x2 + self->colstart;
