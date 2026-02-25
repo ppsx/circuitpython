@@ -325,24 +325,20 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
         }
         remaining_rows -= rows_per_buffer;
 
-        uint16_t subrectangle_size_bytes;
-        if (self->core.colorspace.depth >= 8) {
-            subrectangle_size_bytes = displayio_area_size(&subrectangle) * (self->core.colorspace.depth / 8);
-        } else {
-            subrectangle_size_bytes = displayio_area_size(&subrectangle) / (8 / self->core.colorspace.depth);
-        }
-
-        memset(mask, 0, mask_length * sizeof(mask[0]));
-        memset(buffer, 0, buffer_size * sizeof(buffer[0]));
-
-        displayio_display_core_fill_area(&self->core, &subrectangle, mask, buffer);
-
         #if CIRCUITPY_QSPIBUS
         if (is_qspi_bus) {
-            // QSPI single-transaction path: set_region + RAMWR + pixels
-            // in one begin/end, eliminating per-subrectangle transaction
-            // overhead. begin_transaction waits for any prior async DMA
-            // to finish, so fill_area above overlaps with previous DMA.
+            // QSPI path: fill_area first (overlaps with previous DMA),
+            // then single-transaction set_region + RAMWR + pixels.
+            // depth is always 16 here (guarded by is_qspi_bus check above).
+            uint16_t subrectangle_size_bytes = displayio_area_size(&subrectangle) * (self->core.colorspace.depth / 8);
+
+            memset(mask, 0, mask_length * sizeof(mask[0]));
+            memset(buffer, 0, buffer_size * sizeof(buffer[0]));
+
+            displayio_display_core_fill_area(&self->core, &subrectangle, mask, buffer);
+
+            // begin_transaction waits for any prior async DMA to finish,
+            // so fill_area above overlaps with previous DMA.
             displayio_display_bus_begin_transaction(&self->bus);
             displayio_display_bus_send_region_commands(&self->bus, &self->core, &subrectangle);
             _send_pixels(self, (uint8_t *)buffer, subrectangle_size_bytes);
@@ -350,7 +346,20 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
         } else
         #endif
         {
+            // Non-QSPI path: original ordering preserved exactly.
             displayio_display_bus_set_region_to_update(&self->bus, &self->core, &subrectangle);
+
+            uint16_t subrectangle_size_bytes;
+            if (self->core.colorspace.depth >= 8) {
+                subrectangle_size_bytes = displayio_area_size(&subrectangle) * (self->core.colorspace.depth / 8);
+            } else {
+                subrectangle_size_bytes = displayio_area_size(&subrectangle) / (8 / self->core.colorspace.depth);
+            }
+
+            memset(mask, 0, mask_length * sizeof(mask[0]));
+            memset(buffer, 0, buffer_size * sizeof(buffer[0]));
+
+            displayio_display_core_fill_area(&self->core, &subrectangle, mask, buffer);
 
             // Can't acquire display bus; skip the rest of the data.
             if (!displayio_display_bus_is_free(&self->bus)) {

@@ -101,6 +101,7 @@ void displayio_display_bus_end_transaction(displayio_display_bus_t *self) {
     self->end_transaction(self->bus);
 }
 
+#if CIRCUITPY_QSPIBUS
 // Send column/row window commands. Caller must already be in a transaction.
 void displayio_display_bus_send_region_commands(displayio_display_bus_t *self, displayio_display_core_t *display, displayio_area_t *area) {
     uint16_t x1 = area->x1 + self->colstart;
@@ -210,6 +211,7 @@ void displayio_display_bus_send_region_commands(displayio_display_bus_t *self, d
         self->send(self->bus, DISPLAY_DATA, chip_select, data, data_length / 2);
     }
 }
+#endif
 
 void displayio_display_bus_set_region_to_update(displayio_display_bus_t *self, displayio_display_core_t *display, displayio_area_t *area) {
     uint16_t x1 = area->x1 + self->colstart;
