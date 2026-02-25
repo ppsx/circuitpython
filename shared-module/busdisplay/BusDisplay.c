@@ -601,6 +601,16 @@ void release_busdisplay(busdisplay_busdisplay_obj_t *self) {
 }
 
 void reset_busdisplay(busdisplay_busdisplay_obj_t *self) {
+    #if CIRCUITPY_QSPIBUS
+    // The GC heap is about to be (or has been) reset by stop_mp(),
+    // invalidating any heap-allocated buffers.  NULL the pointers so
+    // _refresh_area() falls back to the safe stack VLA path.
+    // They will be re-allocated on the next construct().
+    self->qspi_pixel_buffer = NULL;
+    self->qspi_mask_buffer = NULL;
+    self->qspi_pixel_buffer_size = 0;
+    self->qspi_mask_buffer_size = 0;
+    #endif
     common_hal_busdisplay_busdisplay_set_auto_refresh(self, true);
     circuitpython_splash.x = 0; // reset position in case someone moved it.
     circuitpython_splash.y = 0;
