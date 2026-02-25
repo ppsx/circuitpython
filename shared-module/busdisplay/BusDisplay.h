@@ -35,6 +35,12 @@ typedef struct {
     bool auto_refresh;
     bool first_manual_refresh;
     bool backlight_on_high;
+    #if CIRCUITPY_QSPIBUS
+    uint32_t *qspi_pixel_buffer;   // Heap-allocated refresh pixel buffer (or NULL).
+    uint32_t *qspi_mask_buffer;    // Heap-allocated refresh mask buffer (or NULL).
+    uint32_t qspi_pixel_buffer_size; // Size in uint32_t words.
+    uint32_t qspi_mask_buffer_size;  // Size in uint32_t words.
+    #endif
 } busdisplay_busdisplay_obj_t;
 
 void busdisplay_busdisplay_background(busdisplay_busdisplay_obj_t *self);

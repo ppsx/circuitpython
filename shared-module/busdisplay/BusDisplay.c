@@ -6,6 +6,7 @@
 
 #include "shared-bindings/busdisplay/BusDisplay.h"
 
+#include "py/gc.h"
 #include "py/runtime.h"
 #if CIRCUITPY_FOURWIRE
 #include "shared-bindings/fourwire/FourWire.h"
@@ -34,6 +35,13 @@
 #include <string.h>
 
 #define DELAY 0x80
+
+// Maximum heap-allocated refresh buffer for QSPI displays.
+// Larger values reduce subrectangle count and per-tile overhead.
+// Default 32768 uint32_t = 128KB, giving ~5 subrectangles for 450×600.
+#ifndef CIRCUITPY_QSPI_HEAP_BUFFER_SIZE
+#define CIRCUITPY_QSPI_HEAP_BUFFER_SIZE (32768)
+#endif
 
 void common_hal_busdisplay_busdisplay_construct(busdisplay_busdisplay_obj_t *self,
     mp_obj_t bus, uint16_t width, uint16_t height, int16_t colstart, int16_t rowstart,
@@ -122,6 +130,41 @@ void common_hal_busdisplay_busdisplay_construct(busdisplay_busdisplay_obj_t *sel
     }
 
     common_hal_busdisplay_busdisplay_set_brightness(self, brightness);
+
+    #if CIRCUITPY_QSPIBUS
+    // Allocate heap-based refresh buffers for QSPI displays.
+    // Larger buffers reduce subrectangle count and per-tile overhead.
+    // Allocation happens here in foreground context (safe for GC).
+    self->qspi_pixel_buffer = NULL;
+    self->qspi_mask_buffer = NULL;
+    self->qspi_pixel_buffer_size = 0;
+    self->qspi_mask_buffer_size = 0;
+    if (mp_obj_is_type(bus, &qspibus_qspibus_type) &&
+        color_depth == 16 &&
+        !data_as_commands &&
+        !SH1107_addressing) {
+        uint32_t target_size = CIRCUITPY_QSPI_HEAP_BUFFER_SIZE;
+        // Try progressively smaller allocations.
+        while (target_size >= CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE) {
+            uint32_t *pbuf = m_malloc_maybe(target_size * sizeof(uint32_t));
+            if (pbuf != NULL) {
+                // Each uint32_t holds 2 pixels at 16bpp.
+                uint32_t pixels = target_size * 2;
+                uint32_t mask_words = (pixels / 32) + 1;
+                uint32_t *mbuf = m_malloc_maybe(mask_words * sizeof(uint32_t));
+                if (mbuf != NULL) {
+                    self->qspi_pixel_buffer = pbuf;
+                    self->qspi_pixel_buffer_size = target_size;
+                    self->qspi_mask_buffer = mbuf;
+                    self->qspi_mask_buffer_size = mask_words;
+                    break;
+                }
+                m_free(pbuf);
+            }
+            target_size /= 2;
+        }
+    }
+    #endif
 
     // Set the group after initialization otherwise we may send pixels while we delay in
     // initialization.
@@ -217,7 +260,7 @@ static void _send_pixels(busdisplay_busdisplay_obj_t *self, uint8_t *pixels, uin
 }
 
 static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_area_t *area) {
-    uint16_t buffer_size = 128; // In uint32_ts
+    uint32_t buffer_size = 128; // In uint32_ts
 
     displayio_area_t clipped;
     // Clip the area to the display by overlapping the areas. If there is no overlap then we're done.
@@ -226,7 +269,7 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
     }
     uint16_t rows_per_buffer = displayio_area_height(&clipped);
     uint8_t pixels_per_word = (sizeof(uint32_t) * 8) / self->core.colorspace.depth;
-    uint16_t pixels_per_buffer = displayio_area_size(&clipped);
+    uint32_t pixels_per_buffer = displayio_area_size(&clipped);
 
     uint16_t subrectangles = 1;
     // for SH1107 and other boundary constrained controllers
@@ -259,41 +302,43 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
 
     #if CIRCUITPY_QSPIBUS
     // QSPI panels benefit from larger sub-rectangle buffers because each chunk
-    // has non-trivial command/window overhead. Keep this path qspibus-specific
-    // to avoid increasing stack usage on other display buses.
-    // Guard: buffer is a VLA on stack; 2048 uint32_t words = 8KB is the safe
-    // upper bound for ESP32-S3's 24KB main task stack.
-    _Static_assert(CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE <= 2048,
-        "CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE exceeds safe stack limit (8KB)");
+    // has non-trivial command/window overhead. Use the pre-allocated heap
+    // buffer when available (allocated in construct). Fall back to stack VLA
+    // with CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE if heap is unavailable.
     bool is_qspi_bus = mp_obj_is_type(self->bus.bus, &qspibus_qspibus_type);
+    bool qspi_use_heap = false;
     if (is_qspi_bus &&
         self->core.colorspace.depth == 16 &&
         !self->bus.data_as_commands &&
         !self->bus.SH1107_addressing &&
+        self->qspi_pixel_buffer != NULL &&
+        self->qspi_pixel_buffer_size > buffer_size) {
+        // Use the pre-allocated heap buffer.
+        buffer_size = self->qspi_pixel_buffer_size;
+        qspi_use_heap = true;
+    } else if (is_qspi_bus &&
+        self->core.colorspace.depth == 16 &&
+        !self->bus.data_as_commands &&
+        !self->bus.SH1107_addressing &&
         buffer_size < CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE) {
+        // Heap unavailable — fall back to stack-based limit.
+        _Static_assert(CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE <= 2048,
+            "CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE exceeds safe stack limit (8KB)");
         buffer_size = CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE;
-        rows_per_buffer = buffer_size * pixels_per_word / displayio_area_width(&clipped);
-        if (rows_per_buffer == 0) {
-            rows_per_buffer = 1;
-        }
-        subrectangles = displayio_area_height(&clipped) / rows_per_buffer;
-        if (displayio_area_height(&clipped) % rows_per_buffer != 0) {
-            subrectangles++;
-        }
-        pixels_per_buffer = rows_per_buffer * displayio_area_width(&clipped);
-        buffer_size = pixels_per_buffer / pixels_per_word;
-        if (pixels_per_buffer % pixels_per_word) {
-            buffer_size += 1;
-        }
     }
 
     if (is_qspi_bus &&
         self->core.colorspace.depth == 16 &&
         !self->bus.data_as_commands &&
-        displayio_area_height(&clipped) > 1 &&
-        rows_per_buffer < 2 &&
-        (2 * displayio_area_width(&clipped) + pixels_per_word - 1) / pixels_per_word <= CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE) {
-        rows_per_buffer = 2;
+        !self->bus.SH1107_addressing) {
+        rows_per_buffer = buffer_size * pixels_per_word / displayio_area_width(&clipped);
+        if (rows_per_buffer == 0) {
+            rows_per_buffer = 1;
+        }
+        // Clamp to actual display height.
+        if (rows_per_buffer > displayio_area_height(&clipped)) {
+            rows_per_buffer = displayio_area_height(&clipped);
+        }
         subrectangles = displayio_area_height(&clipped) / rows_per_buffer;
         if (displayio_area_height(&clipped) % rows_per_buffer != 0) {
             subrectangles++;
@@ -303,14 +348,48 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
         if (pixels_per_buffer % pixels_per_word) {
             buffer_size += 1;
         }
+
+        // Ensure at least 2 rows per buffer when possible.
+        if (rows_per_buffer < 2 &&
+            displayio_area_height(&clipped) > 1 &&
+            (2 * displayio_area_width(&clipped) + pixels_per_word - 1) / pixels_per_word <= (qspi_use_heap ? self->qspi_pixel_buffer_size : (uint32_t)CIRCUITPY_QSPI_DISPLAY_AREA_BUFFER_SIZE)) {
+            rows_per_buffer = 2;
+            subrectangles = displayio_area_height(&clipped) / rows_per_buffer;
+            if (displayio_area_height(&clipped) % rows_per_buffer != 0) {
+                subrectangles++;
+            }
+            pixels_per_buffer = rows_per_buffer * displayio_area_width(&clipped);
+            buffer_size = pixels_per_buffer / pixels_per_word;
+            if (pixels_per_buffer % pixels_per_word) {
+                buffer_size += 1;
+            }
+        }
     }
     #endif
 
-    // Allocated and shared as a uint32_t array so the compiler knows the
-    // alignment everywhere.
-    uint32_t buffer[buffer_size];
+    // Allocate pixel and mask buffers.
+    // QSPI path: use pre-allocated heap buffers when available.
+    // Non-QSPI / fallback: use stack-allocated VLAs.
     uint32_t mask_length = (pixels_per_buffer / 32) + 1;
-    uint32_t mask[mask_length];
+    uint32_t *buffer;
+    uint32_t *mask;
+    #if CIRCUITPY_QSPIBUS
+    uint32_t stack_buffer[qspi_use_heap ? 1 : buffer_size];
+    uint32_t stack_mask[qspi_use_heap ? 1 : mask_length];
+    if (qspi_use_heap) {
+        buffer = self->qspi_pixel_buffer;
+        mask = self->qspi_mask_buffer;
+    } else {
+        buffer = stack_buffer;
+        mask = stack_mask;
+    }
+    #else
+    uint32_t stack_buffer[buffer_size];
+    uint32_t stack_mask[mask_length];
+    buffer = stack_buffer;
+    mask = stack_mask;
+    #endif
+
     uint16_t remaining_rows = displayio_area_height(&clipped);
 
     for (uint16_t j = 0; j < subrectangles; j++) {
@@ -330,7 +409,7 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
             // QSPI path: fill_area first (overlaps with previous DMA),
             // then single-transaction set_region + RAMWR + pixels.
             // depth is always 16 here (guarded by is_qspi_bus check above).
-            uint16_t subrectangle_size_bytes = displayio_area_size(&subrectangle) * (self->core.colorspace.depth / 8);
+            uint32_t subrectangle_size_bytes = (uint32_t)displayio_area_size(&subrectangle) * (self->core.colorspace.depth / 8);
 
             memset(mask, 0, mask_length * sizeof(mask[0]));
             memset(buffer, 0, buffer_size * sizeof(buffer[0]));
@@ -496,6 +575,19 @@ void busdisplay_busdisplay_background(busdisplay_busdisplay_obj_t *self) {
 
 void release_busdisplay(busdisplay_busdisplay_obj_t *self) {
     common_hal_busdisplay_busdisplay_set_auto_refresh(self, false);
+    #if CIRCUITPY_QSPIBUS
+    // Free heap-allocated refresh buffers.
+    if (self->qspi_pixel_buffer != NULL) {
+        m_free(self->qspi_pixel_buffer);
+        self->qspi_pixel_buffer = NULL;
+        self->qspi_pixel_buffer_size = 0;
+    }
+    if (self->qspi_mask_buffer != NULL) {
+        m_free(self->qspi_mask_buffer);
+        self->qspi_mask_buffer = NULL;
+        self->qspi_mask_buffer_size = 0;
+    }
+    #endif
     release_display_core(&self->core);
     #if (CIRCUITPY_PWMIO)
     if (self->backlight_pwm.base.type == &pwmio_pwmout_type) {
@@ -521,4 +613,8 @@ void reset_busdisplay(busdisplay_busdisplay_obj_t *self) {
 void busdisplay_busdisplay_collect_ptrs(busdisplay_busdisplay_obj_t *self) {
     displayio_display_core_collect_ptrs(&self->core);
     displayio_display_bus_collect_ptrs(&self->bus);
+    #if CIRCUITPY_QSPIBUS
+    gc_collect_ptr(self->qspi_pixel_buffer);
+    gc_collect_ptr(self->qspi_mask_buffer);
+    #endif
 }
