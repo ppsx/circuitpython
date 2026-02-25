@@ -380,6 +380,20 @@ static bool _refresh_area(busdisplay_busdisplay_obj_t *self, const displayio_are
         usb_background();
         #endif
     }
+
+    #if CIRCUITPY_QSPIBUS
+    if (is_qspi_bus) {
+        // Drain the last async DMA transfer before returning.
+        // Within the loop, begin_transaction() waits for the PREVIOUS
+        // subrectangle's DMA, enabling fill_area/DMA overlap.  But the
+        // LAST subrectangle's DMA is still in-flight when the loop ends.
+        // Without this drain, bus_free() returns false on the next
+        // refresh() call, causing it to be silently skipped.
+        displayio_display_bus_begin_transaction(&self->bus);
+        displayio_display_bus_end_transaction(&self->bus);
+    }
+    #endif
+
     return true;
 }
 
