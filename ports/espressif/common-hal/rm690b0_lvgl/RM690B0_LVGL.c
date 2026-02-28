@@ -274,10 +274,7 @@ void common_hal_rm690b0_lvgl_rm690b0_lvgl_deinit(rm690b0_lvgl_rm690b0_lvgl_obj_t
     self->touch_i2c_obj = mp_const_none;
 
     if (rm690b0_lvgl_singleton == self) {
-        if (lvgl_initialized) {
-            lv_deinit();
-            lvgl_initialized = false;
-        }
+        lvgl_initialized = false;
         rm690b0_lvgl_singleton = NULL;
     }
 
