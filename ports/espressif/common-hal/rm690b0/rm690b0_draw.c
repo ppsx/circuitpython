@@ -109,6 +109,9 @@ void common_hal_rm690b0_rm690b0_vline(rm690b0_rm690b0_obj_t *self, mp_int_t x, m
 }
 
 void common_hal_rm690b0_rm690b0_rect(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_int_t color) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
     common_hal_rm690b0_rm690b0_hline(self, x, y, width, color);
     common_hal_rm690b0_rm690b0_hline(self, x, y + height - 1, width, color);
     common_hal_rm690b0_rm690b0_vline(self, x, y, height, color);
@@ -119,7 +122,57 @@ void common_hal_rm690b0_rm690b0_rect(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
 // line
 // ============================================================================
 
+#define CS_INSIDE 0
+#define CS_LEFT 1
+#define CS_RIGHT 2
+#define CS_BOTTOM 4
+#define CS_TOP 8
+
+static inline int compute_outcode(mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h) {
+    int code = CS_INSIDE;
+    if (x < 0) code |= CS_LEFT;
+    else if (x >= w) code |= CS_RIGHT;
+    if (y < 0) code |= CS_TOP;
+    else if (y >= h) code |= CS_BOTTOM;
+    return code;
+}
+
 static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, mp_int_t color) {
+    int outcode0 = compute_outcode(x0, y0, self->width, self->height);
+    int outcode1 = compute_outcode(x1, y1, self->width, self->height);
+    bool accept = false;
+
+    while (true) {
+        if (!(outcode0 | outcode1)) {
+            accept = true;
+            break;
+        } else if (outcode0 & outcode1) {
+            break;
+        } else {
+            int outcodeOut = outcode0 ? outcode0 : outcode1;
+            mp_int_t x = 0, y = 0;
+            if (outcodeOut & CS_BOTTOM) {
+                x = x0 + (x1 - x0) * (self->height - 1 - y0) / (y1 - y0);
+                y = self->height - 1;
+            } else if (outcodeOut & CS_TOP) {
+                x = x0 + (x1 - x0) * (0 - y0) / (y1 - y0);
+                y = 0;
+            } else if (outcodeOut & CS_RIGHT) {
+                y = y0 + (y1 - y0) * (self->width - 1 - x0) / (x1 - x0);
+                x = self->width - 1;
+            } else if (outcodeOut & CS_LEFT) {
+                y = y0 + (y1 - y0) * (0 - x0) / (x1 - x0);
+                x = 0;
+            }
+            if (outcodeOut == outcode0) {
+                x0 = x; y0 = y; outcode0 = compute_outcode(x0, y0, self->width, self->height);
+            } else {
+                x1 = x; y1 = y; outcode1 = compute_outcode(x1, y1, self->width, self->height);
+            }
+        }
+    }
+    if (!accept) return;
+
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     if (impl == NULL || impl->framebuffer == NULL) {
         return;
@@ -222,25 +275,6 @@ void common_hal_rm690b0_rm690b0_line(rm690b0_rm690b0_obj_t *self, mp_int_t x0, m
         return;
     }
 
-    mp_int_t dx = labs(x1 - x0);
-    mp_int_t dy = labs(y1 - y0);
-    mp_int_t line_length = (dx > dy) ? dx : dy;
-
-    const mp_int_t SPLIT_THRESHOLD = 100;
-    const mp_int_t TARGET_SEGMENT = 50;
-
-    if (line_length > SPLIT_THRESHOLD) {
-        mp_int_t num_segments = (line_length + TARGET_SEGMENT - 1) / TARGET_SEGMENT;
-        for (mp_int_t i = 0; i < num_segments; i++) {
-            mp_int_t seg_x0 = x0 + (x1 - x0) * i / num_segments;
-            mp_int_t seg_y0 = y0 + (y1 - y0) * i / num_segments;
-            mp_int_t seg_x1 = x0 + (x1 - x0) * (i + 1) / num_segments;
-            mp_int_t seg_y1 = y0 + (y1 - y0) * (i + 1) / num_segments;
-            rm690b0_draw_line_segment(self, seg_x0, seg_y0, seg_x1, seg_y1, color);
-        }
-        return;
-    }
-
     rm690b0_draw_line_segment(self, x0, y0, x1, y1, color);
 }
 
@@ -256,6 +290,10 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
     }
     if (radius == 0) {
         common_hal_rm690b0_rm690b0_pixel(self, x, y, color);
+        return;
+    }
+
+    if (x + radius < 0 || x - radius >= self->width || y + radius < 0 || y - radius >= self->height) {
         return;
     }
 
@@ -336,6 +374,11 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
     mp_int_t by = y - radius;
     mp_int_t bw = row_count;
     mp_int_t bh = row_count;
+
+    if (bx >= self->width || by >= self->height || bx + bw <= 0 || by + bh <= 0) {
+        return;
+    }
+
     bool circle_fully_inside = (bx >= 0 && by >= 0 &&
         bx + bw <= self->width && by + bh <= self->height);
 

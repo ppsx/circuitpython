@@ -140,6 +140,8 @@ bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int_t *hei
             end_y = start_y + 2;
         } else if (start_y >= 1) {
             start_y = end_y - 2;
+        } else {
+            return false;
         }
     }
 
@@ -275,7 +277,9 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
 
     // Check if direct DMA from framebuffer is possible (full-width flush).
     // Direct DMA avoids copying to chunk buffers entirely.
-    bool direct_dma = (fx == 0 && fw == RM690B0_PANEL_WIDTH && x == 0 && width == RM690B0_PANEL_WIDTH);
+    // In single-buffer mode, we disable direct DMA to prevent Python from
+    // overwriting the framebuffer while DMA is still reading it.
+    bool direct_dma = impl->double_buffered && (fx == 0 && fw == RM690B0_PANEL_WIDTH && x == 0 && width == RM690B0_PANEL_WIDTH);
 
     size_t available_pixels;
     if (direct_dma) {
@@ -314,7 +318,6 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     uint16_t *alloc_buffer = NULL;
     if (!direct_dma) {
         use_static_buffers = (impl->chunk_buffers[0] != NULL &&
-            impl->chunk_buffers[1] != NULL &&
             impl->chunk_buffer_pixels >= max_chunk_pixels);
 
         if (!use_static_buffers) {
@@ -322,6 +325,7 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
             if (alloc_buffer == NULL) {
                 return ESP_ERR_NO_MEM;
             }
+            impl->dma_alloc_buffer_ptr = alloc_buffer;
         }
     }
 
@@ -352,7 +356,11 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
                 current_buffer = impl->chunk_buffers[current_idx];
                 impl->dma_buffer_in_use[current_idx] = true;
                 pending_id = current_idx;
-                buf_idx = (buf_idx + 1) % 2;
+                if (impl->chunk_buffers[1] != NULL) {
+                    buf_idx = (buf_idx + 1) % 2;
+                } else {
+                    buf_idx = 0;
+                }
             } else {
                 while (impl->dma_alloc_buffer_in_use) {
                     rm690b0_wait_for_dma_completion(impl);
@@ -447,6 +455,7 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
 
     if (alloc_buffer != NULL) {
         heap_caps_free(alloc_buffer);
+        impl->dma_alloc_buffer_ptr = NULL;
     }
 
     return ret;
@@ -466,6 +475,8 @@ void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t color) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
         return;
     }
+
+    rm690b0_wait_for_all_dma(impl);
 
     uint16_t swapped = RGB565_SWAP_GB(color);
     size_t dma_lines = RM690B0_MAX_CHUNK_ROWS;
@@ -555,6 +566,8 @@ esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
         return ESP_ERR_INVALID_STATE;
     }
 
+    rm690b0_wait_for_all_dma(impl);
+
     size_t dma_lines = RM690B0_MAX_CHUNK_ROWS;
     if (dma_lines > (size_t)rows) {
         dma_lines = rows;
@@ -630,6 +643,11 @@ esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
 // ============================================================================
 
 void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
+    if (rm690b0_singleton != NULL && rm690b0_singleton != self) {
+        ESP_LOGI(TAG, "Cleaning up previous singleton before creating new instance");
+        common_hal_rm690b0_rm690b0_deinit_all();
+    }
+
     self->initialized = false;
     self->width = RM690B0_PANEL_WIDTH;
     self->height = RM690B0_PANEL_HEIGHT;
@@ -639,6 +657,7 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     self->buffer_mode = RM690B0_BUFFER_DOUBLE;
     self->impl = m_malloc(sizeof(rm690b0_impl_t));
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    memset(impl, 0, sizeof(rm690b0_impl_t));
     impl->io_handle = NULL;
     impl->panel_handle = NULL;
     impl->bus_initialized = false;
@@ -680,7 +699,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
 
     if (!self->initialized) {
         ESP_LOGI(TAG, "deinit called on already deinitialized instance");
-        return;
     }
 
     ESP_LOGI(TAG, "Starting RM690B0 deinit");
@@ -699,8 +717,6 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         rm690b0_singleton = NULL;
     }
 
-    self->initialized = false;
-
     if (impl->panel_handle != NULL && impl->framebuffer != NULL) {
         ESP_LOGI(TAG, "Clearing display to black before deinit");
 
@@ -716,6 +732,8 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
             ESP_LOGW(TAG, "Failed to clear screen before deinit (non-critical)");
         }
     }
+    
+    self->initialized = false;
 
     rm690b0_wait_for_all_dma(impl);
 
@@ -791,6 +809,7 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         impl->bus_initialized = false;
     }
 
+    m_free(impl);
     self->impl = NULL;
 
     ESP_LOGI(TAG, "RM690B0 deinit complete - all resources freed");
@@ -947,12 +966,16 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             size_t buf_size = buf_pixels * sizeof(uint16_t);
 
             impl->chunk_buffers[0] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
-            impl->chunk_buffers[1] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
+            if (self->buffer_mode != RM690B0_BUFFER_SINGLE) {
+                impl->chunk_buffers[1] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
+            } else {
+                impl->chunk_buffers[1] = NULL;
+            }
 
-            if (impl->chunk_buffers[0] != NULL && impl->chunk_buffers[1] != NULL) {
+            if (impl->chunk_buffers[0] != NULL && (self->buffer_mode == RM690B0_BUFFER_SINGLE || impl->chunk_buffers[1] != NULL)) {
                 impl->chunk_buffer_pixels = buf_pixels;
-                ESP_LOGI(TAG, "Allocated dual DMA chunk buffers (%zu pixels each, %zu rows)",
-                    impl->chunk_buffer_pixels, current_chunk_rows);
+                ESP_LOGI(TAG, "Allocated %s DMA chunk buffer(s) (%zu pixels each, %zu rows)",
+                    impl->chunk_buffers[1] != NULL ? "dual" : "single", impl->chunk_buffer_pixels, current_chunk_rows);
                 break;
             }
 
@@ -992,8 +1015,8 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     esp_err_t clear_ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
     if (clear_ret != ESP_OK) {
-        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to clear display: %s"), esp_err_to_name(clear_ret));
-        return;
+        ret = clear_ret;
+        goto cleanup;
     }
     ESP_LOGI(TAG, "Display filled with black");
 
@@ -1180,7 +1203,11 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                 for (size_t i = 0; i < impl->dirty_count; i++) {
                     rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
                     ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
-                    (void)ret;
+                    if (ret != ESP_OK) {
+                        mp_raise_msg_varg(&mp_type_RuntimeError,
+                            MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                            esp_err_to_name(ret), ret);
+                    }
                 }
             } else {
                 ret = rm690b0_flush_region(self, impl->dirty_merged_x, impl->dirty_merged_y,
@@ -1192,7 +1219,7 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                 }
             }
         } else {
-            esp_err_t ret = rm690b0_flush_region(self, 0, 0, self->width, self->height);
+            esp_err_t ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
             if (ret != ESP_OK) {
                 mp_raise_msg_varg(&mp_type_RuntimeError,
                     MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
@@ -1212,8 +1239,8 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
 
     mp_int_t flush_x = 0;
     mp_int_t flush_y = 0;
-    mp_int_t flush_w = self->width;
-    mp_int_t flush_h = self->height;
+    mp_int_t flush_w = RM690B0_PANEL_WIDTH;
+    mp_int_t flush_h = RM690B0_PANEL_HEIGHT;
 
     if (impl->dirty_count > 0) {
         size_t individual_area = 0;
@@ -1225,17 +1252,32 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         if (merged_area > individual_area * 3 / 2) {
             for (size_t i = 0; i < impl->dirty_count; i++) {
                 rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
-                rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
+                esp_err_t ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
+                if (ret != ESP_OK) {
+                    mp_raise_msg_varg(&mp_type_RuntimeError,
+                        MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                        esp_err_to_name(ret), ret);
+                }
             }
         } else {
             flush_x = impl->dirty_merged_x;
             flush_y = impl->dirty_merged_y;
             flush_w = impl->dirty_merged_w;
             flush_h = impl->dirty_merged_h;
-            rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
+            esp_err_t ret = rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
+            if (ret != ESP_OK) {
+                mp_raise_msg_varg(&mp_type_RuntimeError,
+                    MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                    esp_err_to_name(ret), ret);
+            }
         }
     } else {
-        rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
+        esp_err_t ret = rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
+        if (ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError,
+                MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                esp_err_to_name(ret), ret);
+        }
     }
 
     // Swap buffer pointers. DMA may still be in flight reading from the

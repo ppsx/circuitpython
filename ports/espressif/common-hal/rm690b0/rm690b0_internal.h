@@ -169,6 +169,7 @@ typedef struct rm690b0_impl {
     SemaphoreHandle_t transfer_done_sem;
     bool dma_buffer_in_use[2];
     bool dma_alloc_buffer_in_use;
+    uint16_t *dma_alloc_buffer_ptr;
     size_t dma_inflight;
     rm690b0_dma_pending_list_t dma_pending;
     int16_t *circle_span_cache;
@@ -206,20 +207,12 @@ static inline void rm690b0_dma_pending_init(rm690b0_dma_pending_list_t *list) {
 }
 
 static inline void rm690b0_dma_pending_push(rm690b0_dma_pending_list_t *list, uint8_t id) {
+    if (list->count >= RM690B0_PANEL_IO_QUEUE_DEPTH) return;
     portENTER_CRITICAL(&rm690b0_spinlock);
     list->ids[list->tail] = id;
     list->tail = (list->tail + 1) % RM690B0_PANEL_IO_QUEUE_DEPTH;
     list->count++;
     portEXIT_CRITICAL(&rm690b0_spinlock);
-}
-
-static inline uint8_t rm690b0_dma_pending_pop(rm690b0_dma_pending_list_t *list) {
-    portENTER_CRITICAL(&rm690b0_spinlock);
-    uint8_t id = list->ids[list->head];
-    list->head = (list->head + 1) % RM690B0_PANEL_IO_QUEUE_DEPTH;
-    list->count--;
-    portEXIT_CRITICAL(&rm690b0_spinlock);
-    return id;
 }
 
 static inline void rm690b0_wait_for_dma_completion(rm690b0_impl_t *impl) {
@@ -230,6 +223,15 @@ static inline void rm690b0_wait_for_dma_completion(rm690b0_impl_t *impl) {
     if (impl->transfer_done_sem) {
         if (xSemaphoreTake(impl->transfer_done_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
             ESP_LOGE("RM690B0", "DMA wait timeout! Halting to prevent memory corruption.");
+            impl->dma_inflight = 0;
+            impl->dma_buffer_in_use[0] = false;
+            impl->dma_buffer_in_use[1] = false;
+            impl->dma_alloc_buffer_in_use = false;
+            if (impl->dma_alloc_buffer_ptr) {
+                heap_caps_free(impl->dma_alloc_buffer_ptr);
+                impl->dma_alloc_buffer_ptr = NULL;
+            }
+            rm690b0_dma_pending_init(&impl->dma_pending);
             mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("DMA transfer timed out - hardware requires reset"));
             return;
         }
@@ -237,17 +239,25 @@ static inline void rm690b0_wait_for_dma_completion(rm690b0_impl_t *impl) {
         esp_rom_delay_us(50);
     }
 
+    portENTER_CRITICAL(&rm690b0_spinlock);
     if (impl->dma_inflight > 0) {
         impl->dma_inflight--;
     }
-
+    
+    uint8_t id = 255;
     if (impl->dma_pending.count > 0) {
-        uint8_t id = rm690b0_dma_pending_pop(&impl->dma_pending);
-        if (id < 2) {
-            impl->dma_buffer_in_use[id] = false;
-        } else if (id == RM690B0_PENDING_BUFFER_ALLOC) {
-            impl->dma_alloc_buffer_in_use = false;
-        }
+        id = impl->dma_pending.ids[impl->dma_pending.head];
+        impl->dma_pending.head = (impl->dma_pending.head + 1) % RM690B0_PANEL_IO_QUEUE_DEPTH;
+        impl->dma_pending.count--;
+    }
+    portEXIT_CRITICAL(&rm690b0_spinlock);
+
+    if (id < 2) {
+        impl->dma_buffer_in_use[id] = false;
+    } else if (id == RM690B0_PENDING_BUFFER_ALLOC) {
+        impl->dma_alloc_buffer_in_use = false;
+    } else if (id == RM690B0_PENDING_BUFFER_TEMP) {
+        // do nothing, just consume it
     }
 }
 

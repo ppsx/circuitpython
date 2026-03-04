@@ -355,14 +355,14 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
             max_x = cursor_x;
         }
 
-        if (cursor_x >= RM690B0_PANEL_WIDTH) {
+        if (cursor_x >= self->width) {
             cursor_x = x;
             cursor_y += font_height;
             if (cursor_y + font_height > max_y) {
                 max_y = cursor_y + font_height;
             }
         }
-        if (cursor_y >= RM690B0_PANEL_HEIGHT) {
+        if (cursor_y >= self->height) {
             break;
         }
     }
@@ -400,11 +400,20 @@ mp_int_t common_hal_rm690b0_rm690b0_get_text_width(rm690b0_rm690b0_obj_t *self, 
     mp_int_t w, h;
     rm690b0_get_font_dims(self->font_id, &w, &h);
 
-    size_t visible = 0;
+    size_t max_visible = 0;
+    size_t current_visible = 0;
     for (size_t i = 0; i < len; i++) {
-        if (text[i] != '\n' && text[i] != '\r') {
-            visible++;
+        if (text[i] == '\n') {
+            if (current_visible > max_visible) {
+                max_visible = current_visible;
+            }
+            current_visible = 0;
+        } else if (text[i] != '\r') {
+            current_visible++;
         }
     }
-    return (mp_int_t)visible * w;
+    if (current_visible > max_visible) {
+        max_visible = current_visible;
+    }
+    return (mp_int_t)max_visible * w;
 }

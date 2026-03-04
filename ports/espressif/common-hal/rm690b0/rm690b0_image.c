@@ -55,8 +55,13 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
         return;
     }
 
-    if (header->compression != 0 && header->compression != 3) {
+    if (header->compression != 0) {
         mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
+        return;
+    }
+
+    if (header->width <= 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP width"));
         return;
     }
 
@@ -67,6 +72,14 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
 
     if (data_offset >= bufinfo.len) {
         mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
+        return;
+    }
+
+    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
+    int src_stride = width * (header->bpp / 8) + row_padding;
+
+    if (data_offset + (size_t)height * src_stride > bufinfo.len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("BMP data truncated"));
         return;
     }
 
@@ -84,9 +97,6 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     const uint8_t *src_data = (const uint8_t *)bufinfo.buf + data_offset;
-
-    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
-    int src_stride = width * (header->bpp / 8) + row_padding;
 
     if (self->rotation == 0) {
         size_t fb_stride = RM690B0_PANEL_WIDTH;
@@ -305,8 +315,13 @@ void common_hal_rm690b0_rm690b0_convert_bmp(rm690b0_rm690b0_obj_t *self, mp_obj_
         return;
     }
 
-    if (header->compression != 0 && header->compression != 3) {
+    if (header->compression != 0) {
         mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
+        return;
+    }
+
+    if (header->width <= 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP width"));
         return;
     }
 
@@ -320,17 +335,22 @@ void common_hal_rm690b0_rm690b0_convert_bmp(rm690b0_rm690b0_obj_t *self, mp_obj_
         return;
     }
 
+    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
+    int src_stride = width * (header->bpp / 8) + row_padding;
+
+    if (data_offset + (size_t)height * src_stride > src_info.len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("BMP data truncated"));
+        return;
+    }
+
     size_t max_dest_pixels = dest_info.len / sizeof(uint16_t);
-    if ((size_t)(width * height) > max_dest_pixels) {
+    if ((size_t)width * (size_t)height > max_dest_pixels) {
          mp_raise_ValueError(MP_ERROR_TEXT("Destination bitmap too small"));
          return;
     }
 
     uint16_t *dest_buf = (uint16_t *)dest_info.buf;
     const uint8_t *src_pixels = (const uint8_t *)src_info.buf + data_offset;
-
-    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
-    int src_stride = width * (header->bpp / 8) + row_padding;
 
     for (int row = 0; row < height; row++) {
          int src_row_idx = top_down ? row : (height - 1 - row);

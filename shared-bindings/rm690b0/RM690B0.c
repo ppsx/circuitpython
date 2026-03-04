@@ -534,9 +534,8 @@ MP_PROPERTY_GETTER(rm690b0_rm690b0_font_height_obj,
 //|
 static mp_obj_t rm690b0_rm690b0_text_width(mp_obj_t self_in, mp_obj_t text_obj) {
     rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(text_obj, &bufinfo, MP_BUFFER_READ);
-    mp_int_t width = common_hal_rm690b0_rm690b0_get_text_width(self, bufinfo.buf, bufinfo.len);
+    GET_STR_DATA_LEN(text_obj, text_data, text_len);
+    mp_int_t width = common_hal_rm690b0_rm690b0_get_text_width(self, (const char *)text_data, text_len);
     return mp_obj_new_int(width);
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(rm690b0_rm690b0_text_width_obj, rm690b0_rm690b0_text_width);
