@@ -32,6 +32,175 @@ typedef struct {
 } bmp_header_t;
 #pragma pack(pop)
 
+typedef enum {
+    RM690B0_BMP_PIXEL_BGR888 = 0,
+    RM690B0_BMP_PIXEL_RGB565 = 1,
+    RM690B0_BMP_PIXEL_XRGB1555 = 2,
+} rm690b0_bmp_pixel_format_t;
+
+static inline uint16_t rm690b0_read_u16_le(const uint8_t *src) {
+    return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+}
+
+static inline uint32_t rm690b0_read_u32_le(const uint8_t *src) {
+    return (uint32_t)src[0]
+        | ((uint32_t)src[1] << 8)
+        | ((uint32_t)src[2] << 16)
+        | ((uint32_t)src[3] << 24);
+}
+
+static inline uint16_t rm690b0_bmp_1555_to_rgb565(uint16_t pixel) {
+    uint16_t r5 = (pixel >> 10) & 0x1F;
+    uint16_t g5 = (pixel >> 5) & 0x1F;
+    uint16_t b5 = pixel & 0x1F;
+    uint16_t g6 = (uint16_t)((g5 << 1) | (g5 >> 4));
+    return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+}
+
+static bool rm690b0_parse_bmp_pixel_format(const bmp_header_t *header, const uint8_t *bmp_data, size_t buf_len,
+    rm690b0_bmp_pixel_format_t *out_pixel_format, size_t *out_bytes_per_pixel) {
+
+    if (header->bpp == 24) {
+        if (header->compression == 3) {
+            if (header->bpp != 16 && header->bpp != 32) {
+                mp_raise_ValueError(MP_ERROR_TEXT("Compression=3 only supported for 16/32 bpp"));
+                return false;
+            }
+        } else if (header->compression != 0) {
+            mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
+            return false;
+        }
+        *out_pixel_format = RM690B0_BMP_PIXEL_BGR888;
+        *out_bytes_per_pixel = 3;
+        return true;
+    }
+
+    if (header->bpp != 16) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Only 16-bit and 24-bit BMP supported"));
+        return false;
+    }
+
+    *out_bytes_per_pixel = 2;
+
+    if (header->compression == 0) {
+        // BI_RGB 16-bit BMP is conventionally X1R5G5B5.
+        *out_pixel_format = RM690B0_BMP_PIXEL_XRGB1555;
+        return true;
+    }
+
+    if (header->compression != 3) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Unsupported 16-bit BMP compression"));
+        return false;
+    }
+
+    // BI_BITFIELDS: expect RGB masks at DIB + 40 (BITMAPINFOHEADER extension).
+    size_t masks_offset = 14u + 40u;
+    if (masks_offset + 12u > buf_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("BMP bit masks truncated"));
+        return false;
+    }
+    if ((size_t)header->offset < masks_offset + 12u) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP bit mask offset"));
+        return false;
+    }
+
+    uint32_t mask_r = rm690b0_read_u32_le(bmp_data + masks_offset);
+    uint32_t mask_g = rm690b0_read_u32_le(bmp_data + masks_offset + 4u);
+    uint32_t mask_b = rm690b0_read_u32_le(bmp_data + masks_offset + 8u);
+
+    if (mask_r == 0xF800 && mask_g == 0x07E0 && mask_b == 0x001F) {
+        *out_pixel_format = RM690B0_BMP_PIXEL_RGB565;
+        return true;
+    }
+    if (mask_r == 0x7C00 && mask_g == 0x03E0 && mask_b == 0x001F) {
+        *out_pixel_format = RM690B0_BMP_PIXEL_XRGB1555;
+        return true;
+    }
+
+    mp_raise_ValueError(MP_ERROR_TEXT("Unsupported 16-bit BMP bit masks"));
+    return false;
+}
+
+static bool rm690b0_parse_bmp_layout(
+    const uint8_t *bmp_data,
+    const bmp_header_t *header,
+    size_t buf_len,
+    mp_int_t *out_width,
+    mp_int_t *out_height,
+    bool *out_top_down,
+    size_t *out_data_offset,
+    size_t *out_src_stride,
+    size_t *out_bytes_per_pixel,
+    rm690b0_bmp_pixel_format_t *out_pixel_format) {
+
+    if (header->width <= 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP width"));
+        return false;
+    }
+
+    if (header->planes != 1) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Unsupported BMP color planes"));
+        return false;
+    }
+
+    if (header->header_size < 40) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Unsupported BMP header"));
+        return false;
+    }
+
+    if (header->height == 0 || header->height == INT32_MIN) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP height"));
+        return false;
+    }
+
+    size_t bytes_per_pixel = 0;
+    rm690b0_bmp_pixel_format_t pixel_format = RM690B0_BMP_PIXEL_BGR888;
+    if (!rm690b0_parse_bmp_pixel_format(header, bmp_data, buf_len, &pixel_format, &bytes_per_pixel)) {
+        return false;
+    }
+    uint64_t width_u64 = (uint64_t)(uint32_t)header->width;
+    int64_t signed_height = header->height;
+    uint64_t height_u64 = signed_height < 0 ? (uint64_t)(-signed_height) : (uint64_t)signed_height;
+    uint64_t row_bytes_u64 = width_u64 * bytes_per_pixel;
+    uint64_t row_padding_u64 = (4 - (row_bytes_u64 % 4)) % 4;
+    uint64_t src_stride_u64 = row_bytes_u64 + row_padding_u64;
+
+    if (src_stride_u64 > SIZE_MAX || height_u64 > SIZE_MAX) {
+        mp_raise_ValueError(MP_ERROR_TEXT("BMP dimensions too large"));
+        return false;
+    }
+
+    size_t data_offset = (size_t)header->offset;
+    uint64_t min_data_offset_u64 = 14u + (uint64_t)header->header_size;
+    if ((uint64_t)header->offset < min_data_offset_u64) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
+        return false;
+    }
+    if (data_offset > buf_len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
+        return false;
+    }
+
+    uint64_t payload_u64 = height_u64 * src_stride_u64;
+    if (payload_u64 > (uint64_t)(buf_len - data_offset)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("BMP data truncated"));
+        return false;
+    }
+
+    *out_width = (mp_int_t)width_u64;
+    *out_height = (mp_int_t)height_u64;
+    *out_top_down = header->height < 0;
+    *out_data_offset = data_offset;
+    *out_src_stride = (size_t)src_stride_u64;
+    if (out_bytes_per_pixel != NULL) {
+        *out_bytes_per_pixel = bytes_per_pixel;
+    }
+    if (out_pixel_format != NULL) {
+        *out_pixel_format = pixel_format;
+    }
+    return true;
+}
+
 void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_obj_t bmp_data) {
     CHECK_INITIALIZED();
 
@@ -50,36 +219,15 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
         return;
     }
 
-    if (header->bpp != 24 && header->bpp != 16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Only 16-bit and 24-bit BMP supported"));
-        return;
-    }
-
-    if (header->compression != 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
-        return;
-    }
-
-    if (header->width <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP width"));
-        return;
-    }
-
-    mp_int_t width = header->width;
-    mp_int_t height = abs(header->height);
-    bool top_down = (header->height < 0);
-    size_t data_offset = header->offset;
-
-    if (data_offset >= bufinfo.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
-        return;
-    }
-
-    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
-    int src_stride = width * (header->bpp / 8) + row_padding;
-
-    if (data_offset + (size_t)height * src_stride > bufinfo.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("BMP data truncated"));
+    mp_int_t width = 0;
+    mp_int_t height = 0;
+    bool top_down = false;
+    size_t data_offset = 0;
+    size_t src_stride = 0;
+    size_t bytes_per_pixel = 0;
+    rm690b0_bmp_pixel_format_t pixel_format = RM690B0_BMP_PIXEL_BGR888;
+    if (!rm690b0_parse_bmp_layout((const uint8_t *)bufinfo.buf, header, bufinfo.len, &width, &height, &top_down,
+            &data_offset, &src_stride, &bytes_per_pixel, &pixel_format)) {
         return;
     }
 
@@ -102,45 +250,59 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
         size_t fb_stride = RM690B0_PANEL_WIDTH;
         uint16_t *fb = impl->framebuffer;
 
-        for (int row = 0; row < clip_h; row++) {
-            int src_y = y_offset + row;
-            int src_row_idx = top_down ? src_y : (height - 1 - src_y);
-            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * (header->bpp / 8);
+        for (mp_int_t row = 0; row < clip_h; row++) {
+            mp_int_t src_y = y_offset + row;
+            mp_int_t src_row_idx = top_down ? src_y : (height - 1 - src_y);
+            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * bytes_per_pixel;
 
             uint16_t *dst_ptr = fb + (size_t)(clip_y + row) * fb_stride + clip_x;
 
-            if (header->bpp == 24) {
-                for (int col = 0; col < clip_w; col++) {
-                    uint8_t b = row_ptr[col * 3];
-                    uint8_t g = row_ptr[col * 3 + 1];
-                    uint8_t r = row_ptr[col * 3 + 2];
+            if (pixel_format == RM690B0_BMP_PIXEL_BGR888) {
+                for (mp_int_t col = 0; col < clip_w; col++) {
+                    size_t col3 = (size_t)col * 3;
+                    uint8_t b = row_ptr[col3];
+                    uint8_t g = row_ptr[col3 + 1];
+                    uint8_t r = row_ptr[col3 + 2];
                     uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
                     dst_ptr[col] = RGB565_SWAP_GB(rgb);
                 }
-            } else { // 16-bit
-                for (int col = 0; col < clip_w; col++) {
-                    uint16_t val = row_ptr[col * 2] | (row_ptr[col * 2 + 1] << 8);
+            } else if (pixel_format == RM690B0_BMP_PIXEL_RGB565) {
+                for (mp_int_t col = 0; col < clip_w; col++) {
+                    size_t col2 = (size_t)col * 2;
+                    uint16_t val = rm690b0_read_u16_le(row_ptr + col2);
                     dst_ptr[col] = RGB565_SWAP_GB(val);
+                }
+            } else {
+                for (mp_int_t col = 0; col < clip_w; col++) {
+                    size_t col2 = (size_t)col * 2;
+                    uint16_t val_1555 = rm690b0_read_u16_le(row_ptr + col2);
+                    dst_ptr[col] = RGB565_SWAP_GB(rm690b0_bmp_1555_to_rgb565(val_1555));
                 }
             }
         }
     } else {
-        for (int row = 0; row < clip_h; row++) {
-            int src_y = y_offset + row;
-            int src_row_idx = top_down ? src_y : (height - 1 - src_y);
-            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * (header->bpp / 8);
+        for (mp_int_t row = 0; row < clip_h; row++) {
+            mp_int_t src_y = y_offset + row;
+            mp_int_t src_row_idx = top_down ? src_y : (height - 1 - src_y);
+            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * bytes_per_pixel;
 
-            for (int col = 0; col < clip_w; col++) {
+            for (mp_int_t col = 0; col < clip_w; col++) {
                 uint16_t color565;
-                if (header->bpp == 24) {
-                    uint8_t b = row_ptr[col * 3];
-                    uint8_t g = row_ptr[col * 3 + 1];
-                    uint8_t r = row_ptr[col * 3 + 2];
+                if (pixel_format == RM690B0_BMP_PIXEL_BGR888) {
+                    size_t col3 = (size_t)col * 3;
+                    uint8_t b = row_ptr[col3];
+                    uint8_t g = row_ptr[col3 + 1];
+                    uint8_t r = row_ptr[col3 + 2];
                     uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
                     color565 = RGB565_SWAP_GB(rgb);
-                } else {
-                    uint16_t val = row_ptr[col * 2] | (row_ptr[col * 2 + 1] << 8);
+                } else if (pixel_format == RM690B0_BMP_PIXEL_RGB565) {
+                    size_t col2 = (size_t)col * 2;
+                    uint16_t val = rm690b0_read_u16_le(row_ptr + col2);
                     color565 = RGB565_SWAP_GB(val);
+                } else {
+                    size_t col2 = (size_t)col * 2;
+                    uint16_t val_1555 = rm690b0_read_u16_le(row_ptr + col2);
+                    color565 = RGB565_SWAP_GB(rm690b0_bmp_1555_to_rgb565(val_1555));
                 }
                 rm690b0_write_pixel_rotated(self, impl, clip_x + col, clip_y + row, color565);
             }
@@ -292,6 +454,8 @@ void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t 
 // ============================================================================
 
 void common_hal_rm690b0_rm690b0_convert_bmp(rm690b0_rm690b0_obj_t *self, mp_obj_t src_data, mp_obj_t dest_bitmap) {
+    (void)self;
+
     mp_buffer_info_t src_info;
     mp_get_buffer_raise(src_data, &src_info, MP_BUFFER_READ);
 
@@ -310,65 +474,55 @@ void common_hal_rm690b0_rm690b0_convert_bmp(rm690b0_rm690b0_obj_t *self, mp_obj_
         return;
     }
 
-    if (header->bpp != 24 && header->bpp != 16) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Only 16-bit and 24-bit BMP supported"));
+    mp_int_t width = 0;
+    mp_int_t height = 0;
+    bool top_down = false;
+    size_t data_offset = 0;
+    size_t src_stride = 0;
+    rm690b0_bmp_pixel_format_t pixel_format = RM690B0_BMP_PIXEL_BGR888;
+    if (!rm690b0_parse_bmp_layout((const uint8_t *)src_info.buf, header, src_info.len, &width, &height, &top_down,
+            &data_offset, &src_stride, NULL, &pixel_format)) {
         return;
     }
 
-    if (header->compression != 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Compressed BMP not supported"));
+    size_t needed_bytes = 0;
+    if (!check_bitmap_size((size_t)width, (size_t)height, &needed_bytes)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("BMP dimensions too large"));
         return;
     }
-
-    if (header->width <= 0) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP width"));
+    if (needed_bytes > dest_info.len) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Destination bitmap too small"));
         return;
-    }
-
-    mp_int_t width = header->width;
-    mp_int_t height = abs(header->height);
-    bool top_down = (header->height < 0);
-    size_t data_offset = header->offset;
-
-    if (data_offset >= src_info.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Invalid BMP data offset"));
-        return;
-    }
-
-    int row_padding = (4 - ((width * (header->bpp / 8)) % 4)) % 4;
-    int src_stride = width * (header->bpp / 8) + row_padding;
-
-    if (data_offset + (size_t)height * src_stride > src_info.len) {
-        mp_raise_ValueError(MP_ERROR_TEXT("BMP data truncated"));
-        return;
-    }
-
-    size_t max_dest_pixels = dest_info.len / sizeof(uint16_t);
-    if ((size_t)width * (size_t)height > max_dest_pixels) {
-         mp_raise_ValueError(MP_ERROR_TEXT("Destination bitmap too small"));
-         return;
     }
 
     uint16_t *dest_buf = (uint16_t *)dest_info.buf;
     const uint8_t *src_pixels = (const uint8_t *)src_info.buf + data_offset;
 
-    for (int row = 0; row < height; row++) {
-         int src_row_idx = top_down ? row : (height - 1 - row);
+    for (mp_int_t row = 0; row < height; row++) {
+         mp_int_t src_row_idx = top_down ? row : (height - 1 - row);
          const uint8_t *row_ptr = src_pixels + (size_t)src_row_idx * src_stride;
          uint16_t *dst_row_ptr = dest_buf + (size_t)row * width;
 
-         if (header->bpp == 24) {
-             for (int col = 0; col < width; col++) {
-                 uint8_t b = row_ptr[col * 3];
-                 uint8_t g = row_ptr[col * 3 + 1];
-                 uint8_t r = row_ptr[col * 3 + 2];
+         if (pixel_format == RM690B0_BMP_PIXEL_BGR888) {
+             for (mp_int_t col = 0; col < width; col++) {
+                 size_t col3 = (size_t)col * 3;
+                 uint8_t b = row_ptr[col3];
+                 uint8_t g = row_ptr[col3 + 1];
+                 uint8_t r = row_ptr[col3 + 2];
                  uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
                  dst_row_ptr[col] = RGB565_SWAP_GB(rgb);
              }
-         } else {
-             for (int col = 0; col < width; col++) {
-                 uint16_t val = row_ptr[col * 2] | (row_ptr[col * 2 + 1] << 8);
+         } else if (pixel_format == RM690B0_BMP_PIXEL_RGB565) {
+             for (mp_int_t col = 0; col < width; col++) {
+                 size_t col2 = (size_t)col * 2;
+                 uint16_t val = rm690b0_read_u16_le(row_ptr + col2);
                  dst_row_ptr[col] = RGB565_SWAP_GB(val);
+             }
+         } else {
+             for (mp_int_t col = 0; col < width; col++) {
+                 size_t col2 = (size_t)col * 2;
+                 uint16_t val_1555 = rm690b0_read_u16_le(row_ptr + col2);
+                 dst_row_ptr[col] = RGB565_SWAP_GB(rm690b0_bmp_1555_to_rgb565(val_1555));
              }
          }
     }

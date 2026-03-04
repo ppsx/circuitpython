@@ -103,7 +103,8 @@
 #define RM690B0_Y_GAP                (CIRCUITPY_RM690B0_Y_GAP)
 #define RM690B0_MAX_CHUNK_ROWS       (32)
 #define RM690B0_MAX_CHUNK_PIXELS     (LCD_H_RES * RM690B0_MAX_CHUNK_ROWS)
-#define RM690B0_MAX_DIAMETER         ((RM690B0_PANEL_WIDTH * 2) + 1)
+#define RM690B0_MAX_PANEL_DIM        ((RM690B0_PANEL_WIDTH > RM690B0_PANEL_HEIGHT) ? RM690B0_PANEL_WIDTH : RM690B0_PANEL_HEIGHT)
+#define RM690B0_MAX_DIAMETER         ((RM690B0_MAX_PANEL_DIM * 2) + 1)
 #define RM690B0_PANEL_IO_QUEUE_DEPTH (16)
 
 #define RM690B0_PENDING_BUFFER_FRAMEBUFFER   (0xFF)
@@ -162,6 +163,7 @@ typedef struct rm690b0_impl {
     size_t framebuffer_pixels;
     uint16_t *framebuffer_front;
     bool double_buffered;
+    bool front_buffer_alloc_failed;
     size_t dirty_count;
     bool dirty_merged_valid;
     mp_int_t dirty_merged_x, dirty_merged_y, dirty_merged_w, dirty_merged_h;
@@ -169,9 +171,11 @@ typedef struct rm690b0_impl {
     SemaphoreHandle_t transfer_done_sem;
     bool dma_buffer_in_use[2];
     bool dma_alloc_buffer_in_use;
+    bool alloc_front_failed;
     uint16_t *dma_alloc_buffer_ptr;
     size_t dma_inflight;
     rm690b0_dma_pending_list_t dma_pending;
+    bool fatal_dma_error;
     int16_t *circle_span_cache;
     size_t circle_span_capacity;
 } rm690b0_impl_t;
@@ -207,8 +211,11 @@ static inline void rm690b0_dma_pending_init(rm690b0_dma_pending_list_t *list) {
 }
 
 static inline void rm690b0_dma_pending_push(rm690b0_dma_pending_list_t *list, uint8_t id) {
-    if (list->count >= RM690B0_PANEL_IO_QUEUE_DEPTH) return;
     portENTER_CRITICAL(&rm690b0_spinlock);
+    if (list->count >= RM690B0_PANEL_IO_QUEUE_DEPTH) {
+        portEXIT_CRITICAL(&rm690b0_spinlock);
+        return;
+    }
     list->ids[list->tail] = id;
     list->tail = (list->tail + 1) % RM690B0_PANEL_IO_QUEUE_DEPTH;
     list->count++;
@@ -216,7 +223,11 @@ static inline void rm690b0_dma_pending_push(rm690b0_dma_pending_list_t *list, ui
 }
 
 static inline void rm690b0_wait_for_dma_completion(rm690b0_impl_t *impl) {
-    if (impl->dma_inflight == 0) {
+    portENTER_CRITICAL(&rm690b0_spinlock);
+    size_t inflight = impl->dma_inflight;
+    portEXIT_CRITICAL(&rm690b0_spinlock);
+
+    if (inflight == 0) {
         return;
     }
 
@@ -227,6 +238,7 @@ static inline void rm690b0_wait_for_dma_completion(rm690b0_impl_t *impl) {
             impl->dma_buffer_in_use[0] = false;
             impl->dma_buffer_in_use[1] = false;
             impl->dma_alloc_buffer_in_use = false;
+            impl->fatal_dma_error = true;
             if (impl->dma_alloc_buffer_ptr) {
                 heap_caps_free(impl->dma_alloc_buffer_ptr);
                 impl->dma_alloc_buffer_ptr = NULL;
@@ -304,7 +316,8 @@ static inline void rm690b0_fill_span_fast(uint16_t *dest, size_t span_width, uin
     }
 
     if (span_width & 1) {
-        *((uint16_t *)word_ptr) = color;
+        uint16_t *last_ptr = (uint16_t *)word_ptr;
+        *last_ptr = color;
     }
 }
 
@@ -357,6 +370,23 @@ static inline bool check_bitmap_size(size_t width, size_t height, size_t *out_by
     return true;
 }
 
+static inline bool rm690b0_add_mp_int_checked(mp_int_t a, mp_int_t b, mp_int_t *out) {
+    if ((b > 0 && a > (mp_int_t)(INTPTR_MAX - b)) ||
+        (b < 0 && a < (mp_int_t)(INTPTR_MIN - b))) {
+        return false;
+    }
+    *out = a + b;
+    return true;
+}
+
+static inline mp_int_t rm690b0_add_mp_int_saturating(mp_int_t a, mp_int_t b) {
+    mp_int_t out = 0;
+    if (rm690b0_add_mp_int_checked(a, b, &out)) {
+        return out;
+    }
+    return b >= 0 ? (mp_int_t)INTPTR_MAX : (mp_int_t)INTPTR_MIN;
+}
+
 static inline bool clip_logical_rect(const rm690b0_rm690b0_obj_t *self,
     mp_int_t *x, mp_int_t *y,
     mp_int_t *width, mp_int_t *height) {
@@ -366,8 +396,12 @@ static inline bool clip_logical_rect(const rm690b0_rm690b0_obj_t *self,
 
     mp_int_t x0 = *x;
     mp_int_t y0 = *y;
-    mp_int_t x1 = x0 + *width;
-    mp_int_t y1 = y0 + *height;
+    mp_int_t x1 = 0;
+    mp_int_t y1 = 0;
+    if (!rm690b0_add_mp_int_checked(x0, *width, &x1) ||
+        !rm690b0_add_mp_int_checked(y0, *height, &y1)) {
+        return false;
+    }
 
     if (x1 <= 0 || y1 <= 0 || x0 >= self->width || y0 >= self->height) {
         return false;
@@ -477,10 +511,16 @@ static inline void rm690b0_fill_rect_framebuffer(rm690b0_impl_t *impl,
             rows_to_copy = bh - filled_rows;
         }
 
-        for (mp_int_t i = 0; i < rows_to_copy; i++) {
-            uint16_t *src_row = base_ptr + (size_t)i * fb_stride;
-            uint16_t *dest_row = base_ptr + (size_t)(filled_rows + i) * fb_stride;
-            memcpy(dest_row, src_row, row_bytes);
+        if (bw == RM690B0_PANEL_WIDTH) {
+            uint16_t *dest_block = base_ptr + (size_t)filled_rows * fb_stride;
+            size_t bytes_to_copy = (size_t)rows_to_copy * fb_stride * sizeof(uint16_t);
+            memcpy(dest_block, base_ptr, bytes_to_copy);
+        } else {
+            for (mp_int_t i = 0; i < rows_to_copy; i++) {
+                uint16_t *src_row = base_ptr + (size_t)i * fb_stride;
+                uint16_t *dest_row = base_ptr + (size_t)(filled_rows + i) * fb_stride;
+                memcpy(dest_row, src_row, row_bytes);
+            }
         }
 
         filled_rows += rows_to_copy;
@@ -505,7 +545,12 @@ static inline esp_err_t rm690b0_finalize_draw(
     mp_int_t phys_x, mp_int_t phys_y, mp_int_t phys_w, mp_int_t phys_h) {
     mark_dirty_region(impl, phys_x, phys_y, phys_w, phys_h);
     if (!impl->double_buffered) {
-        return rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
+        esp_err_t ret = rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
+        if (ret == ESP_OK) {
+            impl->dirty_count = 0;
+            impl->dirty_merged_valid = false;
+        }
+        return ret;
     }
     return ESP_OK;
 }

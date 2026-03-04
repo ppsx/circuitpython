@@ -100,15 +100,18 @@ static void rm690b0_draw_glyph_impl(
         return;
     }
 
-    if (x >= self->width || y >= self->height ||
-        x + glyph_w <= 0 || y + glyph_h <= 0) {
+    mp_int_t clip_x = x;
+    mp_int_t clip_y = y;
+    mp_int_t clip_w = glyph_w;
+    mp_int_t clip_h = glyph_h;
+    if (!clip_logical_rect(self, &clip_x, &clip_y, &clip_w, &clip_h)) {
         return;
     }
 
-    mp_int_t col_start = (x < 0) ? -x : 0;
-    mp_int_t col_end   = (x + glyph_w > self->width)  ? (self->width  - x) : glyph_w;
-    mp_int_t row_start = (y < 0) ? -y : 0;
-    mp_int_t row_end   = (y + glyph_h > self->height) ? (self->height - y) : glyph_h;
+    mp_int_t col_start = clip_x - x;
+    mp_int_t col_end = col_start + clip_w;
+    mp_int_t row_start = clip_y - y;
+    mp_int_t row_end = row_start + clip_h;
 
     uint16_t fg_swapped = RGB565_SWAP_GB(fg);
     uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
@@ -185,7 +188,8 @@ static void rm690b0_draw_glyph_impl(
             esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y,
                                                   dirty_w, dirty_h);
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Glyph flush failed: %s", esp_err_to_name(ret));
+                mp_raise_msg_varg(&mp_type_RuntimeError,
+                    MP_ERROR_TEXT("Failed to draw text: %s"), esp_err_to_name(ret));
             }
         }
     }
@@ -296,16 +300,21 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
     mp_int_t min_x = x;
     mp_int_t max_x = x;
     mp_int_t min_y = y;
-    mp_int_t max_y = y + font_height;
+    mp_int_t max_y = rm690b0_add_mp_int_saturating(y, font_height);
 
     for (size_t i = 0; i < text_len; i++) {
         uint8_t ch = (uint8_t)text[i];
 
+        if (cursor_x < min_x) {
+            min_x = cursor_x;
+        }
+
         if (ch == '\n') {
             cursor_x = x;
-            cursor_y += font_height;
-            if (cursor_y + font_height > max_y) {
-                max_y = cursor_y + font_height;
+            cursor_y = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+            mp_int_t line_bottom = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+            if (line_bottom > max_y) {
+                max_y = line_bottom;
             }
             continue;
         } else if (ch == '\r') {
@@ -349,7 +358,7 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
                 break;
             }
         }
-        cursor_x += font_width;
+        cursor_x = rm690b0_add_mp_int_saturating(cursor_x, font_width);
 
         if (cursor_x > max_x) {
             max_x = cursor_x;
@@ -357,9 +366,10 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
 
         if (cursor_x >= self->width) {
             cursor_x = x;
-            cursor_y += font_height;
-            if (cursor_y + font_height > max_y) {
-                max_y = cursor_y + font_height;
+            cursor_y = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+            mp_int_t line_bottom = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+            if (line_bottom > max_y) {
+                max_y = line_bottom;
             }
         }
         if (cursor_y >= self->height) {
@@ -377,10 +387,13 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
             if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
                 esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h);
                 if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Batch text flush failed: %s", esp_err_to_name(ret));
+                    mp_raise_msg_varg(&mp_type_RuntimeError,
+                        MP_ERROR_TEXT("Failed to draw text: %s"), esp_err_to_name(ret));
                 }
             }
         }
+        impl->dirty_count = 0;
+        impl->dirty_merged_valid = false;
     }
 }
 

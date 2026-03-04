@@ -71,8 +71,8 @@ int16_t *rm690b0_acquire_span_cache(rm690b0_impl_t *impl, size_t needed_rows) {
 bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int_t *height) {
     mp_int_t start_x = *x;
     mp_int_t start_y = *y;
-    mp_int_t end_x = start_x + *width;
-    mp_int_t end_y = start_y + *height;
+    mp_int_t end_x = rm690b0_add_mp_int_saturating(start_x, *width);
+    mp_int_t end_y = rm690b0_add_mp_int_saturating(start_y, *height);
 
     if (start_x < 0) {
         start_x = 0;
@@ -190,6 +190,34 @@ static esp_err_t rm690b0_tx_param(const rm690b0_impl_t *impl, uint8_t cmd, const
 
     uint32_t packed_cmd = ((uint32_t)RM690B0_OPCODE_WRITE_CMD << 24) | ((uint32_t)cmd << 8);
     return esp_lcd_panel_io_tx_param(impl->io_handle, packed_cmd, param, param_size);
+}
+
+static bool rm690b0_try_wait_for_all_dma(rm690b0_impl_t *impl, const char *context) {
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        rm690b0_wait_for_all_dma(impl);
+        nlr_pop();
+        return true;
+    }
+
+    ESP_LOGW(TAG, "%s: DMA wait raised, continuing deinit cleanup", context);
+    return false;
+}
+
+static bool rm690b0_try_flush_region(
+    rm690b0_rm690b0_obj_t *self,
+    mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height,
+    esp_err_t *out_ret) {
+
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        *out_ret = rm690b0_flush_region(self, x, y, width, height);
+        nlr_pop();
+        return true;
+    }
+
+    *out_ret = ESP_FAIL;
+    return false;
 }
 
 // ============================================================================
@@ -378,6 +406,21 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
                 const uint16_t *src = framebuffer + (size_t)start_y * fb_stride;
                 memcpy(current_buffer, src, chunk_bytes);
             } else {
+                mp_int_t flush_end_x = rm690b0_add_mp_int_saturating(fx, fw);
+                mp_int_t src_left = x;
+                if (src_left < 0) {
+                    src_left = 0;
+                } else if (src_left > RM690B0_PANEL_WIDTH) {
+                    src_left = RM690B0_PANEL_WIDTH;
+                }
+                mp_int_t src_right = rm690b0_add_mp_int_saturating(x, width);
+                src_right = rm690b0_add_mp_int_saturating(src_right, -1);
+                if (src_right < -1) {
+                    src_right = -1;
+                } else if (src_right >= RM690B0_PANEL_WIDTH) {
+                    src_right = RM690B0_PANEL_WIDTH - 1;
+                }
+
                 size_t dest_index = 0;
                 for (size_t row = 0; row < rows_this_chunk; row++) {
                     mp_int_t phys_row = start_y + (mp_int_t)row;
@@ -390,16 +433,6 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
 
                     const uint16_t *row_base = framebuffer + (size_t)src_row * fb_stride;
                     mp_int_t dest_col = 0;
-                    mp_int_t flush_end_x = fx + fw;
-
-                    mp_int_t src_left = x;
-                    if (src_left < 0) {
-                        src_left = 0;
-                    }
-                    mp_int_t src_right = x + width - 1;
-                    if (src_right >= RM690B0_PANEL_WIDTH) {
-                        src_right = RM690B0_PANEL_WIDTH - 1;
-                    }
 
                     for (mp_int_t phys_col = fx; phys_col < src_left; phys_col++) {
                         mp_int_t safe_col = (phys_col < 0) ? 0 : ((phys_col >= RM690B0_PANEL_WIDTH) ? RM690B0_PANEL_WIDTH - 1 : phys_col);
@@ -503,12 +536,11 @@ void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t color) {
             return;
         }
         allocated = true;
+        impl->dma_alloc_buffer_ptr = dma_buffer;
     }
 
     const size_t dma_pixels = line_pixels * dma_lines;
-    for (size_t i = 0; i < dma_pixels; i++) {
-        dma_buffer[i] = swapped;
-    }
+    rm690b0_fill_span_fast(dma_buffer, dma_pixels, swapped);
 
     size_t rows_remaining = RM690B0_PANEL_HEIGHT;
     mp_int_t current_y = 0;
@@ -547,6 +579,7 @@ void rm690b0_fill_color_direct(rm690b0_rm690b0_obj_t *self, uint16_t color) {
 
     if (allocated) {
         heap_caps_free(dma_buffer);
+        impl->dma_alloc_buffer_ptr = NULL;
     }
 
     if (ret != ESP_OK) {
@@ -591,12 +624,11 @@ esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
             return ESP_ERR_NO_MEM;
         }
         allocated = true;
+        impl->dma_alloc_buffer_ptr = dma_buffer;
     }
 
     const size_t dma_pixels = line_pixels * dma_lines;
-    for (size_t i = 0; i < dma_pixels; i++) {
-        dma_buffer[i] = swapped_color;
-    }
+    rm690b0_fill_span_fast(dma_buffer, dma_pixels, swapped_color);
 
     size_t rows_remaining = (size_t)rows;
     mp_int_t current_y = start_y;
@@ -629,6 +661,7 @@ esp_err_t rm690b0_fill_rect_direct_fullwidth(rm690b0_rm690b0_obj_t *self,
 
     if (allocated) {
         heap_caps_free(dma_buffer);
+        impl->dma_alloc_buffer_ptr = NULL;
     }
 
     if (ret == ESP_OK && impl->framebuffer != NULL) {
@@ -668,6 +701,7 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     impl->framebuffer_pixels = 0;
     impl->framebuffer_front = NULL;
     impl->double_buffered = false;
+    impl->front_buffer_alloc_failed = false;
     impl->circle_span_cache = NULL;
     impl->circle_span_capacity = 0;
 
@@ -685,6 +719,7 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     impl->dma_alloc_buffer_in_use = false;
     impl->dma_inflight = 0;
     rm690b0_dma_pending_init(&impl->dma_pending);
+    impl->fatal_dma_error = false;
 
     rm690b0_singleton = self;
 
@@ -713,9 +748,8 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         return;
     }
 
-    if (rm690b0_singleton == self) {
-        rm690b0_singleton = NULL;
-    }
+    bool singleton_owned = (rm690b0_singleton == self);
+    bool dma_wait_failed = false;
 
     if (impl->panel_handle != NULL && impl->framebuffer != NULL) {
         ESP_LOGI(TAG, "Clearing display to black before deinit");
@@ -723,20 +757,51 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
         memset(impl->framebuffer, 0, framebuffer_pixels * sizeof(uint16_t));
 
-        esp_err_t ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
-        if (ret == ESP_OK) {
-            rm690b0_wait_for_all_dma(impl);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            ESP_LOGI(TAG, "Screen cleared successfully");
+        esp_err_t ret = ESP_OK;
+        bool flush_completed = rm690b0_try_flush_region(
+            self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, &ret);
+        if (flush_completed && ret == ESP_OK) {
+            if (rm690b0_try_wait_for_all_dma(impl, "deinit clear")) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                ESP_LOGI(TAG, "Screen cleared successfully");
+            } else {
+                ESP_LOGW(TAG, "Screen clear started but DMA drain failed during deinit");
+                dma_wait_failed = true;
+            }
+        } else if (flush_completed) {
+            ESP_LOGW(TAG, "Failed to clear screen before deinit (%s)", esp_err_to_name(ret));
         } else {
-            ESP_LOGW(TAG, "Failed to clear screen before deinit (non-critical)");
+            ESP_LOGW(TAG, "Failed to clear screen before deinit (exception raised)");
+            dma_wait_failed = true;
         }
     }
     
     self->initialized = false;
 
-    rm690b0_wait_for_all_dma(impl);
+    if (!rm690b0_try_wait_for_all_dma(impl, "deinit pre-free")) {
+        dma_wait_failed = true;
+    }
 
+    if (dma_wait_failed) {
+        ESP_LOGE(TAG, "deinit aborted: DMA state uncertain after timeout/exception; hardware reset required");
+        // We still mark it uninitialized so init_display can be attempted, 
+        // but we must clean up panel and IO to avoid handle leaks on re-init.
+        if (impl->panel_handle) {
+            esp_lcd_panel_del(impl->panel_handle);
+            impl->panel_handle = NULL;
+        }
+        if (impl->io_handle) {
+            esp_lcd_panel_io_del(impl->io_handle);
+            impl->io_handle = NULL;
+        }
+        if (impl->bus_initialized) {
+            spi_bus_free(SPI2_HOST);
+            impl->bus_initialized = false;
+        }
+        mp_raise_msg(&mp_type_RuntimeError,
+            MP_ERROR_TEXT("Deinit aborted: DMA state uncertain; reset hardware and retry"));
+        return;
+    }
     if (impl->framebuffer_front) {
         ESP_LOGI(TAG, "Freeing front framebuffer");
         heap_caps_free(impl->framebuffer_front);
@@ -763,6 +828,13 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
     }
     impl->chunk_buffer_pixels = 0;
 
+    if (impl->dma_alloc_buffer_ptr) {
+        ESP_LOGI(TAG, "Freeing orphaned DMA alloc buffer");
+        heap_caps_free(impl->dma_alloc_buffer_ptr);
+        impl->dma_alloc_buffer_ptr = NULL;
+        impl->dma_alloc_buffer_in_use = false;
+    }
+
     if (impl->circle_span_cache) {
         ESP_LOGI(TAG, "Freeing cached circle spans");
         heap_caps_free(impl->circle_span_cache);
@@ -778,7 +850,10 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
     if (LCD_PWR_PIN != GPIO_NUM_NC) {
         ESP_LOGI(TAG, "Turning off display power");
         int off_level = LCD_PWR_ON_LEVEL ? 0 : 1;
-        gpio_set_level(LCD_PWR_PIN, off_level);
+        esp_err_t pwr_ret = gpio_set_level(LCD_PWR_PIN, off_level);
+        if (pwr_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to drive power GPIO low: %s", esp_err_to_name(pwr_ret));
+        }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 
@@ -811,6 +886,9 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
 
     m_free(impl);
     self->impl = NULL;
+    if (singleton_owned) {
+        rm690b0_singleton = NULL;
+    }
 
     ESP_LOGI(TAG, "RM690B0 deinit complete - all resources freed");
 }
@@ -818,9 +896,13 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
 void common_hal_rm690b0_rm690b0_deinit_all(void) {
     if (rm690b0_singleton != NULL) {
         ESP_LOGI(TAG, "Static deinit: cleaning up singleton instance");
-        common_hal_rm690b0_rm690b0_deinit(rm690b0_singleton);
-        rm690b0_singleton = NULL;
-        ESP_LOGI(TAG, "Static deinit: singleton cleaned up");
+        rm690b0_rm690b0_obj_t *active = rm690b0_singleton;
+        common_hal_rm690b0_rm690b0_deinit(active);
+        if (rm690b0_singleton == NULL) {
+            ESP_LOGI(TAG, "Static deinit: singleton cleaned up");
+        } else {
+            ESP_LOGW(TAG, "Static deinit: singleton still active after cleanup attempt");
+        }
     } else {
         ESP_LOGI(TAG, "Static deinit: no active instance to clean up");
     }
@@ -852,6 +934,25 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
         return;
     }
 
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError,
+            MP_ERROR_TEXT("Display object was deinitialized; create a new RM690B0() instance"));
+        return;
+    }
+    if (impl->fatal_dma_error) {
+        mp_raise_msg(&mp_type_RuntimeError,
+            MP_ERROR_TEXT("Display is in fatal DMA state; power-cycle and create a new RM690B0()"));
+        return;
+    }
+    if (impl->panel_handle != NULL || impl->io_handle != NULL || impl->bus_initialized) {
+        mp_raise_msg(&mp_type_RuntimeError,
+            MP_ERROR_TEXT("Display object has stale hardware state; call deinit() and create a new RM690B0()"));
+        return;
+    }
+
+    esp_err_t ret = ESP_OK;
+
     ESP_LOGI(TAG, "Initializing RM690B0 display (%s mode)", LCD_USE_QSPI ? "QSPI" : "SPI");
 
     if (LCD_PWR_PIN != GPIO_NUM_NC) {
@@ -862,17 +963,22 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             .pull_up_en = GPIO_PULLUP_DISABLE,
             .intr_type = GPIO_INTR_DISABLE,
         };
-        gpio_config(&io_conf);
-        gpio_set_level(LCD_PWR_PIN, LCD_PWR_ON_LEVEL);
+        ret = gpio_config(&io_conf);
+        if (ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to configure power GPIO: %s"), esp_err_to_name(ret));
+            return;
+        }
+        ret = gpio_set_level(LCD_PWR_PIN, LCD_PWR_ON_LEVEL);
+        if (ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to enable display power: %s"), esp_err_to_name(ret));
+            return;
+        }
         ESP_LOGI(TAG, "Display power enabled on GPIO%d", LCD_PWR_PIN);
     } else {
         ESP_LOGI(TAG, "No display power control pin configured; assuming panel is already powered");
     }
 
     vTaskDelay(pdMS_TO_TICKS(200));
-
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    esp_err_t ret = ESP_OK;
 
     if (!impl->bus_initialized) {
         size_t max_transfer_bytes = RM690B0_MAX_CHUNK_PIXELS * sizeof(uint16_t);
@@ -948,7 +1054,11 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
     ESP_LOGI(TAG, "Panel initialization complete");
 
-    esp_lcd_panel_set_gap(impl->panel_handle, RM690B0_X_GAP, RM690B0_Y_GAP);
+    ret = esp_lcd_panel_set_gap(impl->panel_handle, RM690B0_X_GAP, RM690B0_Y_GAP);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set panel gap: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
     ESP_LOGI(TAG, "Display gap set to (0, 16)");
 
     ret = esp_lcd_panel_disp_on_off(impl->panel_handle, true);
@@ -993,7 +1103,8 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
 
         if (impl->chunk_buffers[0] == NULL) {
             impl->chunk_buffer_pixels = 0;
-            ESP_LOGW(TAG, "Unable to allocate dual DMA chunk buffers; operations will use slower allocation per draw");
+            ESP_LOGW(TAG, "Unable to allocate %s DMA chunk buffer(s); operations will use slower allocation per draw",
+                self->buffer_mode == RM690B0_BUFFER_SINGLE ? "single" : "dual");
         }
     }
 
@@ -1010,11 +1121,12 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             framebuffer_pixels, (framebuffer_pixels * sizeof(uint16_t)) / 1024);
     }
 
-    for (size_t i = 0; i < framebuffer_pixels; i++) {
-        impl->framebuffer[i] = 0x0000;
-    }
-    esp_err_t clear_ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
-    if (clear_ret != ESP_OK) {
+    memset(impl->framebuffer, 0, framebuffer_pixels * sizeof(uint16_t));
+    esp_err_t clear_ret = ESP_OK;
+    bool flush_completed = rm690b0_try_flush_region(
+        self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, &clear_ret);
+    
+    if (!flush_completed || clear_ret != ESP_OK) {
         ret = clear_ret;
         goto cleanup;
     }
@@ -1039,11 +1151,29 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     self->width = RM690B0_PANEL_WIDTH;
     self->height = RM690B0_PANEL_HEIGHT;
     self->brightness_raw = 0xFF;
+    impl->front_buffer_alloc_failed = false;
+    impl->fatal_dma_error = false;
     self->initialized = true;
     ESP_LOGI(TAG, "RM690B0 display initialization complete");
     return;
 
 cleanup:
+    if (impl->framebuffer_front) {
+        heap_caps_free(impl->framebuffer_front);
+        impl->framebuffer_front = NULL;
+        impl->double_buffered = false;
+    }
+    if (impl->framebuffer) {
+        heap_caps_free(impl->framebuffer);
+        impl->framebuffer = NULL;
+        impl->framebuffer_pixels = 0;
+    }
+    if (impl->circle_span_cache) {
+        heap_caps_free(impl->circle_span_cache);
+        impl->circle_span_cache = NULL;
+        impl->circle_span_capacity = 0;
+    }
+
     if (impl->chunk_buffers[0]) {
         heap_caps_free(impl->chunk_buffers[0]);
         impl->chunk_buffers[0] = NULL;
@@ -1053,6 +1183,12 @@ cleanup:
         impl->chunk_buffers[1] = NULL;
     }
     impl->chunk_buffer_pixels = 0;
+
+    if (impl->dma_alloc_buffer_ptr) {
+        heap_caps_free(impl->dma_alloc_buffer_ptr);
+        impl->dma_alloc_buffer_ptr = NULL;
+        impl->dma_alloc_buffer_in_use = false;
+    }
 
     if (impl->panel_handle) {
         esp_lcd_panel_del(impl->panel_handle);
@@ -1173,15 +1309,20 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
     if (!impl->double_buffered && impl->framebuffer_front == NULL
+        && !impl->front_buffer_alloc_failed
         && self->buffer_mode != RM690B0_BUFFER_SINGLE) {
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
         impl->framebuffer_front = heap_caps_malloc(framebuffer_pixels * sizeof(uint16_t),
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
         if (impl->framebuffer_front == NULL) {
-            ESP_LOGW(TAG, "Unable to allocate front framebuffer - falling back to single-buffered refresh");
+            if (!impl->front_buffer_alloc_failed) {
+                ESP_LOGW(TAG, "Unable to allocate front framebuffer - falling back to single-buffered refresh");
+                impl->front_buffer_alloc_failed = true;
+            }
         } else {
             impl->double_buffered = true;
+            impl->front_buffer_alloc_failed = false;
             ESP_LOGI(TAG, "Allocated front framebuffer (%zu KB) - double-buffering enabled",
                 (framebuffer_pixels * sizeof(uint16_t)) / 1024);
 
@@ -1217,13 +1358,6 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                         MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
                         esp_err_to_name(ret), ret);
                 }
-            }
-        } else {
-            esp_err_t ret = rm690b0_flush_region(self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT);
-            if (ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError,
-                    MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
-                    esp_err_to_name(ret), ret);
             }
         }
         impl->dirty_count = 0;

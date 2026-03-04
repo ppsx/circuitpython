@@ -9,7 +9,7 @@
 
 // Buffer mode constants
 #define RM690B0_BUFFER_SINGLE  0   // 1 framebuffer — dirty-tracked flush, saves 540 KB
-#define RM690B0_BUFFER_DOUBLE  1   // 2 framebuffers — tear-free animation (default)
+#define RM690B0_BUFFER_DOUBLE  1   // Optional 2nd framebuffer allocated on first swap (default)
 
 // Forward declaration for the rm690b0 object type
 typedef struct {

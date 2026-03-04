@@ -28,10 +28,11 @@
 //|         Initializes the panel and internal framebuffers. Call `init_display()`
 //|         before performing any drawing operations.
 //|
-//|         :param int buffer_mode: ``rm690b0.BUFFER_DOUBLE`` (default) allocates a second
-//|             540 KB framebuffer for tear-free animation. ``rm690b0.BUFFER_SINGLE`` uses
-//|             only one framebuffer and flushes dirty regions directly, saving 540 KB of
-//|             SPIRAM — recommended for static UI / dashboard applications.
+//|         :param int buffer_mode: ``rm690b0.BUFFER_DOUBLE`` (default) enables optional
+//|             double buffering for tear-free animation. The second 540 KB framebuffer is
+//|             allocated lazily on first ``swap_buffers()`` when memory is available.
+//|             ``rm690b0.BUFFER_SINGLE`` uses only one framebuffer and flushes dirty
+//|             regions directly, saving 540 KB of SPIRAM.
 //|         """
 //|         ...
 //|
@@ -129,11 +130,11 @@ static mp_obj_t rm690b0_rm690b0_set_font(mp_obj_t self_in, mp_obj_t font_obj) {
 static MP_DEFINE_CONST_FUN_OBJ_2(rm690b0_rm690b0_set_font_obj, rm690b0_rm690b0_set_font);
 
 //|     def text(self, x: int, y: int, text: str, color: int = 0xFFFF, background: int | None = None) -> None:
-//|         """Draw a UTF-8 string using the currently selected built-in font.
+//|         """Draw a byte-oriented string using the currently selected built-in font.
 //|
 //|         :param int x: Left coordinate (in pixels)
 //|         :param int y: Top coordinate (in pixels)
-//|         :param str text: Text to draw (UTF-8; unsupported glyphs may be replaced)
+//|         :param str text: Text to draw. Bytes are rendered using the built-in glyph table.
 //|         :param int color: Foreground RGB565 color (default: white)
 //|         :param int|None background: Optional background RGB565 color. If None, text is drawn transparent over existing pixels.
 //|
@@ -348,11 +349,11 @@ static mp_obj_t rm690b0_rm690b0_blit_jpeg(size_t n_args, const mp_obj_t *args) {
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(rm690b0_rm690b0_blit_jpeg_obj, 4, 4, rm690b0_rm690b0_blit_jpeg);
 
-//|     def convert_bmp(self, src_data: readablebuffer, dest_bitmap: displayio.Bitmap) -> None:
-//|         """Convert a BMP file (internal buffer) to a displayio.Bitmap in RGB565 format (RGB/BGR swapped for display).
+//|     def convert_bmp(self, src_data: readablebuffer, dest_bitmap: writablebuffer) -> None:
+//|         """Convert BMP data to RGB565 (RGB/BGR swapped for this display driver).
 //|
 //|         :param readablebuffer src_data: The full BMP file data
-//|         :param displayio.Bitmap dest_bitmap: The destination bitmap (must be correct size)"""
+//|         :param writablebuffer dest_bitmap: Destination buffer for `width * height * 2` bytes."""
 //|         ...
 static mp_obj_t rm690b0_rm690b0_convert_bmp(size_t n_args, const mp_obj_t *args) {
     rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(args[0]);

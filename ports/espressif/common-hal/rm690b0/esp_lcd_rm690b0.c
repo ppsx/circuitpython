@@ -204,10 +204,18 @@ static esp_err_t panel_rm690b0_init(esp_lcd_panel_t *panel) {
         // Check if the command has been used or conflicts with the internal
         switch (init_cmds[i].cmd) {
             case LCD_CMD_MADCTL:
+                if (init_cmds[i].data == NULL || init_cmds[i].data_bytes < 1) {
+                    ESP_LOGE(TAG, "MADCTL init command missing parameter byte");
+                    return ESP_ERR_INVALID_ARG;
+                }
                 is_cmd_overwritten = true;
                 rm690b0->madctl_val = ((uint8_t *)init_cmds[i].data)[0];
                 break;
             case LCD_CMD_COLMOD:
+                if (init_cmds[i].data == NULL || init_cmds[i].data_bytes < 1) {
+                    ESP_LOGE(TAG, "COLMOD init command missing parameter byte");
+                    return ESP_ERR_INVALID_ARG;
+                }
                 is_cmd_overwritten = true;
                 rm690b0->colmod_val = ((uint8_t *)init_cmds[i].data)[0];
                 break;

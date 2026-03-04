@@ -81,7 +81,8 @@ void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t 
     if (!impl->double_buffered && bx == 0 && bw == RM690B0_PANEL_WIDTH) {
         esp_err_t direct_ret = rm690b0_fill_rect_direct_fullwidth(self, by, bh, swapped_color);
         if (direct_ret == ESP_OK) {
-            mark_dirty_region(impl, bx, by, bw, bh);
+            impl->dirty_count = 0;
+            impl->dirty_merged_valid = false;
             return;
         }
         ESP_LOGW(TAG, "Full-width fast fill_rect path failed (%s) – falling back",
@@ -137,6 +138,16 @@ static inline int compute_outcode(mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h
     return code;
 }
 
+static inline mp_int_t rm690b0_double_to_mp_int_clamped(double value) {
+    if (value > (double)INTPTR_MAX) {
+        return (mp_int_t)INTPTR_MAX;
+    }
+    if (value < (double)INTPTR_MIN) {
+        return (mp_int_t)INTPTR_MIN;
+    }
+    return (mp_int_t)value;
+}
+
 static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, mp_int_t color) {
     int outcode0 = compute_outcode(x0, y0, self->width, self->height);
     int outcode1 = compute_outcode(x1, y1, self->width, self->height);
@@ -152,16 +163,32 @@ static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, 
             int outcodeOut = outcode0 ? outcode0 : outcode1;
             mp_int_t x = 0, y = 0;
             if (outcodeOut & CS_BOTTOM) {
-                x = x0 + (x1 - x0) * (self->height - 1 - y0) / (y1 - y0);
+                if (y1 == y0) {
+                    break;
+                }
+                double t = ((double)(self->height - 1) - (double)y0) / ((double)y1 - (double)y0);
+                x = rm690b0_double_to_mp_int_clamped((double)x0 + ((double)x1 - (double)x0) * t);
                 y = self->height - 1;
             } else if (outcodeOut & CS_TOP) {
-                x = x0 + (x1 - x0) * (0 - y0) / (y1 - y0);
+                if (y1 == y0) {
+                    break;
+                }
+                double t = ((double)0 - (double)y0) / ((double)y1 - (double)y0);
+                x = rm690b0_double_to_mp_int_clamped((double)x0 + ((double)x1 - (double)x0) * t);
                 y = 0;
             } else if (outcodeOut & CS_RIGHT) {
-                y = y0 + (y1 - y0) * (self->width - 1 - x0) / (x1 - x0);
+                if (x1 == x0) {
+                    break;
+                }
+                double t = ((double)(self->width - 1) - (double)x0) / ((double)x1 - (double)x0);
+                y = rm690b0_double_to_mp_int_clamped((double)y0 + ((double)y1 - (double)y0) * t);
                 x = self->width - 1;
             } else if (outcodeOut & CS_LEFT) {
-                y = y0 + (y1 - y0) * (0 - x0) / (x1 - x0);
+                if (x1 == x0) {
+                    break;
+                }
+                double t = ((double)0 - (double)x0) / ((double)x1 - (double)x0);
+                y = rm690b0_double_to_mp_int_clamped((double)y0 + ((double)y1 - (double)y0) * t);
                 x = 0;
             }
             if (outcodeOut == outcode0) {
@@ -249,7 +276,10 @@ static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, 
     }
 
     if (bw > 0 && bh > 0) {
-        rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+        esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+        if (ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw line: %s"), esp_err_to_name(ret));
+        }
     }
 }
 
@@ -293,7 +323,16 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
         return;
     }
 
-    if (x + radius < 0 || x - radius >= self->width || y + radius < 0 || y - radius >= self->height) {
+    mp_int_t max_radius = self->width > self->height ? self->width : self->height;
+    if (radius > max_radius) {
+        radius = max_radius;
+    }
+
+    mp_int_t x_min = rm690b0_add_mp_int_saturating(x, -radius);
+    mp_int_t x_max = rm690b0_add_mp_int_saturating(x, radius);
+    mp_int_t y_min = rm690b0_add_mp_int_saturating(y, -radius);
+    mp_int_t y_max = rm690b0_add_mp_int_saturating(y, radius);
+    if (x_max < 0 || x_min >= self->width || y_max < 0 || y_min >= self->height) {
         return;
     }
 
@@ -326,10 +365,12 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
         }
     }
 
-    mp_int_t bx = x - radius;
-    mp_int_t by = y - radius;
-    mp_int_t bw = radius * 2 + 1;
-    mp_int_t bh = radius * 2 + 1;
+    mp_int_t diameter = rm690b0_add_mp_int_saturating(radius, radius);
+    diameter = rm690b0_add_mp_int_saturating(diameter, 1);
+    mp_int_t bx = x_min;
+    mp_int_t by = y_min;
+    mp_int_t bw = diameter;
+    mp_int_t bh = diameter;
     if (rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
         esp_err_t ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
         if (ret != ESP_OK) {
@@ -353,7 +394,7 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
         return;
     }
 
-    mp_int_t max_radius = (RM690B0_MAX_DIAMETER - 1) / 2;
+    mp_int_t max_radius = self->width > self->height ? self->width : self->height;
     if (radius > max_radius) {
         radius = max_radius;
     }
@@ -364,23 +405,25 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
         return;
     }
 
-    mp_int_t top = y - radius;
-    mp_int_t row_count = radius * 2 + 1;
+    mp_int_t top = rm690b0_add_mp_int_saturating(y, -radius);
+    mp_int_t row_count = rm690b0_add_mp_int_saturating(radius * 2, 1);
     if (row_count <= 0) {
         return;
     }
 
-    mp_int_t bx = x - radius;
-    mp_int_t by = y - radius;
+    mp_int_t bx = rm690b0_add_mp_int_saturating(x, -radius);
+    mp_int_t by = rm690b0_add_mp_int_saturating(y, -radius);
     mp_int_t bw = row_count;
     mp_int_t bh = row_count;
+    mp_int_t bx2 = rm690b0_add_mp_int_saturating(bx, bw);
+    mp_int_t by2 = rm690b0_add_mp_int_saturating(by, bh);
 
-    if (bx >= self->width || by >= self->height || bx + bw <= 0 || by + bh <= 0) {
+    if (bx >= self->width || by >= self->height || bx2 <= 0 || by2 <= 0) {
         return;
     }
 
     bool circle_fully_inside = (bx >= 0 && by >= 0 &&
-        bx + bw <= self->width && by + bh <= self->height);
+        bx2 <= self->width && by2 <= self->height);
 
     #define STACK_ALLOC_THRESHOLD 128
     int16_t left_stack[STACK_ALLOC_THRESHOLD];
@@ -507,12 +550,21 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
 
     mp_int_t clip_bx = bx, clip_by = by, clip_bw = bw, clip_bh = bh;
     if (rm690b0_prepare_draw(self, &clip_bx, &clip_by, &clip_bw, &clip_bh)) {
-        esp_err_t ret = rm690b0_finalize_draw(self, impl, clip_bx, clip_by, clip_bw, clip_bh);
-        if (ret != ESP_OK) {
+        nlr_buf_t nlr;
+        if (nlr_push(&nlr) == 0) {
+            esp_err_t ret = rm690b0_finalize_draw(self, impl, clip_bx, clip_by, clip_bw, clip_bh);
+            nlr_pop();
+            if (ret != ESP_OK) {
+                if (heap_span != NULL) {
+                    heap_caps_free(heap_span);
+                }
+                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_circle: %s"), esp_err_to_name(ret));
+            }
+        } else {
             if (heap_span != NULL) {
                 heap_caps_free(heap_span);
             }
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw fill_circle: %s"), esp_err_to_name(ret));
+            nlr_raise(nlr.ret_val);
         }
     }
 
