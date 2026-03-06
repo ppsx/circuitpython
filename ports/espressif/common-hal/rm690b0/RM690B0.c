@@ -516,6 +516,8 @@ static bool rm690b0_try_flush_region(
 #define RM690B0_DIRTY_TRANSFER_OVERHEAD_PIXELS      (4096u)
 #define RM690B0_DIRTY_COALESCE_GAP_PIXELS           (2)
 #define RM690B0_DIRTY_COALESCE_EXTRA_LIMIT_PIXELS   (4096u)
+#define RM690B0_FB_COPY_COALESCE_GAP_PIXELS         (8)
+#define RM690B0_FB_COPY_COALESCE_EXTRA_LIMIT_PIXELS (4096u)
 
 typedef struct {
     rm690b0_dirty_rect_t rects[RM690B0_MAX_DIRTY_RECTS];
@@ -641,6 +643,63 @@ static size_t rm690b0_coalesce_dirty_rects(rm690b0_dirty_rect_t *rects, size_t c
             }
         }
 next_pass:
+        ;
+    }
+    return count;
+}
+
+static bool rm690b0_should_merge_copy_rects(
+    const rm690b0_dirty_rect_t *a,
+    const rm690b0_dirty_rect_t *b) {
+
+    if (!rm690b0_dirty_rect_is_valid(a) || !rm690b0_dirty_rect_is_valid(b)) {
+        return false;
+    }
+
+    mp_int_t dx = 0;
+    mp_int_t dy = 0;
+    rm690b0_dirty_rect_distance(a, b, &dx, &dy);
+
+    if (dx == 0 && dy == 0) {
+        return true;
+    }
+    if (dx > RM690B0_FB_COPY_COALESCE_GAP_PIXELS ||
+        dy > RM690B0_FB_COPY_COALESCE_GAP_PIXELS) {
+        return false;
+    }
+
+    uint64_t area_sum = rm690b0_dirty_rect_area_u64(a) + rm690b0_dirty_rect_area_u64(b);
+    rm690b0_dirty_rect_t union_rect = rm690b0_dirty_rect_union(a, b);
+    uint64_t union_area = rm690b0_dirty_rect_area_u64(&union_rect);
+
+    uint64_t max_extra = (area_sum >> 1); // +50%
+    if (max_extra > RM690B0_FB_COPY_COALESCE_EXTRA_LIMIT_PIXELS) {
+        max_extra = RM690B0_FB_COPY_COALESCE_EXTRA_LIMIT_PIXELS;
+    }
+    return union_area <= (area_sum + max_extra);
+}
+
+static size_t rm690b0_coalesce_copy_rects(rm690b0_dirty_rect_t *rects, size_t count) {
+    if (count < 2) {
+        return count;
+    }
+
+    bool merged_any = true;
+    while (merged_any && count > 1) {
+        merged_any = false;
+        for (size_t i = 0; i < count; i++) {
+            for (size_t j = i + 1; j < count; j++) {
+                if (!rm690b0_should_merge_copy_rects(&rects[i], &rects[j])) {
+                    continue;
+                }
+                rects[i] = rm690b0_dirty_rect_union(&rects[i], &rects[j]);
+                rects[j] = rects[count - 1];
+                count--;
+                merged_any = true;
+                goto next_copy_pass;
+            }
+        }
+next_copy_pass:
         ;
     }
     return count;
@@ -2074,6 +2133,7 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                 memcpy(impl->framebuffer, impl->framebuffer_front, framebuffer_bytes);
             }
         } else {
+            copy_rect_count = rm690b0_coalesce_copy_rects(copy_rects, copy_rect_count);
             for (size_t i = 0; i < copy_rect_count; i++) {
                 rm690b0_dirty_rect_t *r = &copy_rects[i];
                 rm690b0_copy_framebuffer_region(
