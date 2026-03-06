@@ -674,6 +674,20 @@ static inline void rm690b0_blit_transparent_row_swapped(uint16_t *dst_row,
     }
 }
 
+static inline void rm690b0_copy_swapped_span(uint16_t *dst,
+    const uint16_t *src, mp_int_t width) {
+    mp_int_t col = 0;
+    for (; col + 3 < width; col += 4) {
+        dst[col + 0] = RGB565_SWAP_GB(src[col + 0]);
+        dst[col + 1] = RGB565_SWAP_GB(src[col + 1]);
+        dst[col + 2] = RGB565_SWAP_GB(src[col + 2]);
+        dst[col + 3] = RGB565_SWAP_GB(src[col + 3]);
+    }
+    for (; col < width; col++) {
+        dst[col] = RGB565_SWAP_GB(src[col]);
+    }
+}
+
 static inline void rm690b0_blit_transparent_row_unswapped(uint16_t *dst_row,
     const uint16_t *src_row, mp_int_t width, uint16_t transp) {
     mp_int_t col = 0;
@@ -685,8 +699,9 @@ static inline void rm690b0_blit_transparent_row_unswapped(uint16_t *dst_row,
         while (col < width && src_row[col] != transp) {
             col++;
         }
-        for (mp_int_t i = run_start; i < col; i++) {
-            dst_row[i] = RGB565_SWAP_GB(src_row[i]);
+        mp_int_t run_len = col - run_start;
+        if (run_len > 0) {
+            rm690b0_copy_swapped_span(dst_row + run_start, src_row + run_start, run_len);
         }
     }
 }
@@ -798,9 +813,7 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
                 if (!has_transparency && dest_is_swapped) {
                     memcpy(dst_row, src_row, logical_w * sizeof(uint16_t));
                 } else if (!has_transparency && !dest_is_swapped) {
-                    for (mp_int_t col = 0; col < logical_w; col++) {
-                        dst_row[col] = RGB565_SWAP_GB(src_row[col]);
-                    }
+                    rm690b0_copy_swapped_span(dst_row, src_row, logical_w);
                 } else if (has_transparency && dest_is_swapped) {
                     rm690b0_blit_transparent_row_swapped(dst_row, src_row, logical_w, transp);
                 } else {
