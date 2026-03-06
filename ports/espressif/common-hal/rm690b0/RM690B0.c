@@ -186,6 +186,7 @@ static const rm690b0_lcd_init_cmd_t lcd_init_cmds[] = {
 // Keep framebuffer allocations/copies alignment-friendly for GDMA-based memcpy.
 #define RM690B0_FB_DMA_ALIGNMENT      (16)
 #define RM690B0_FB_COPY_TIMEOUT_MS    (1000)
+#define RM690B0_FB_COPY_NEAR_FULLWIDTH_MARGIN (16)
 
 static size_t rm690b0_align_up_size(size_t value, size_t alignment) {
     if (alignment == 0) {
@@ -434,6 +435,21 @@ static void rm690b0_copy_framebuffer_region(
     mp_int_t copy_h = height;
     if (!expand_even_region(&copy_x, &copy_y, &copy_w, &copy_h)) {
         return;
+    }
+
+    // Promote near-full-width regions to full-width so copy=True can use the
+    // contiguous fast path (DMA or memcpy block copy) instead of row slices.
+    if (copy_w < RM690B0_PANEL_WIDTH) {
+        mp_int_t copy_x2 = rm690b0_add_mp_int_saturating(copy_x, copy_w);
+        if (copy_x >= 0 && copy_x2 <= RM690B0_PANEL_WIDTH) {
+            mp_int_t left_gap = copy_x;
+            mp_int_t right_gap = RM690B0_PANEL_WIDTH - copy_x2;
+            if (left_gap <= RM690B0_FB_COPY_NEAR_FULLWIDTH_MARGIN &&
+                right_gap <= RM690B0_FB_COPY_NEAR_FULLWIDTH_MARGIN) {
+                copy_x = 0;
+                copy_w = RM690B0_PANEL_WIDTH;
+            }
+        }
     }
 
     const size_t fb_stride = RM690B0_PANEL_WIDTH;
