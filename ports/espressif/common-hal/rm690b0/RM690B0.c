@@ -811,14 +811,6 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
         impl, fw_sz, fh_sz, max_chunk_height, direct_dma);
 
     size_t max_chunk_pixels = fw_sz * chunk_height;
-    mp_int_t src_x2 = 0;
-    mp_int_t src_y2 = 0;
-    bool source_in_bounds =
-        x >= 0 && y >= 0 && width > 0 && height > 0 &&
-        rm690b0_add_mp_int_checked(x, width, &src_x2) &&
-        rm690b0_add_mp_int_checked(y, height, &src_y2) &&
-        src_x2 <= RM690B0_PANEL_WIDTH &&
-        src_y2 <= RM690B0_PANEL_HEIGHT;
 
     bool use_static_buffers = false;
     uint16_t *alloc_buffer = NULL;
@@ -878,65 +870,19 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
 
             dma_buffer = current_buffer;
 
-            if (x == 0 && width == RM690B0_PANEL_WIDTH) {
+            if (fx == 0 && fw == RM690B0_PANEL_WIDTH) {
                 size_t bytes_per_row = fb_stride * sizeof(uint16_t);
                 size_t chunk_bytes = rows_this_chunk * bytes_per_row;
                 const uint16_t *src = framebuffer + (size_t)start_y * fb_stride;
                 memcpy(current_buffer, src, chunk_bytes);
-            } else if (source_in_bounds) {
-                // Fast path: source rect is fully in-bounds, so expanded flush rows
-                // can be copied directly from framebuffer without per-column loops.
+            } else {
+                // expand_even_region() clamps to panel bounds, so the flush window
+                // can always be copied row-by-row without edge replication.
                 const uint16_t *src = framebuffer + (size_t)start_y * fb_stride + (size_t)fx;
                 size_t row_bytes = fw_sz * sizeof(uint16_t);
                 size_t dest_index = 0;
                 for (size_t row = 0; row < rows_this_chunk; row++) {
                     memcpy(&current_buffer[dest_index], src + row * fb_stride, row_bytes);
-                    dest_index += fw_sz;
-                }
-            } else {
-                mp_int_t flush_end_x = rm690b0_add_mp_int_saturating(fx, fw);
-                mp_int_t src_left = x;
-                if (src_left < 0) {
-                    src_left = 0;
-                } else if (src_left > RM690B0_PANEL_WIDTH) {
-                    src_left = RM690B0_PANEL_WIDTH;
-                }
-                mp_int_t src_right = rm690b0_add_mp_int_saturating(x, width);
-                src_right = rm690b0_add_mp_int_saturating(src_right, -1);
-                if (src_right < -1) {
-                    src_right = -1;
-                } else if (src_right >= RM690B0_PANEL_WIDTH) {
-                    src_right = RM690B0_PANEL_WIDTH - 1;
-                }
-
-                size_t dest_index = 0;
-                for (size_t row = 0; row < rows_this_chunk; row++) {
-                    mp_int_t phys_row = start_y + (mp_int_t)row;
-                    mp_int_t src_row = phys_row;
-                    if (src_row < 0) {
-                        src_row = 0;
-                    } else if (src_row >= RM690B0_PANEL_HEIGHT) {
-                        src_row = RM690B0_PANEL_HEIGHT - 1;
-                    }
-
-                    const uint16_t *row_base = framebuffer + (size_t)src_row * fb_stride;
-                    mp_int_t dest_col = 0;
-
-                    for (mp_int_t phys_col = fx; phys_col < src_left; phys_col++) {
-                        mp_int_t safe_col = (phys_col < 0) ? 0 : ((phys_col >= RM690B0_PANEL_WIDTH) ? RM690B0_PANEL_WIDTH - 1 : phys_col);
-                        current_buffer[dest_index + dest_col++] = row_base[safe_col];
-                    }
-
-                    if (src_left <= src_right) {
-                        size_t middle_len = (size_t)(src_right - src_left + 1);
-                        memcpy(&current_buffer[dest_index + dest_col], &row_base[src_left], middle_len * sizeof(uint16_t));
-                        dest_col += (mp_int_t)middle_len;
-                    }
-
-                    for (mp_int_t phys_col = src_right + 1; phys_col < flush_end_x; phys_col++) {
-                        mp_int_t safe_col = (phys_col < 0) ? 0 : ((phys_col >= RM690B0_PANEL_WIDTH) ? RM690B0_PANEL_WIDTH - 1 : phys_col);
-                        current_buffer[dest_index + dest_col++] = row_base[safe_col];
-                    }
                     dest_index += fw_sz;
                 }
             }
