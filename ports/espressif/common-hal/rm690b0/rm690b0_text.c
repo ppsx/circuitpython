@@ -92,7 +92,7 @@ static void rm690b0_draw_glyph_impl(
     rm690b0_rm690b0_obj_t *self,
     mp_int_t x, mp_int_t y,
     const uint8_t *glyph,
-    uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush,
+    uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush,
     int glyph_w, int glyph_h) {
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
@@ -181,15 +181,18 @@ static void rm690b0_draw_glyph_impl(
         }
     }
 
-    mp_int_t dirty_x = x, dirty_y = y, dirty_w = glyph_w, dirty_h = glyph_h;
-    if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-        mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
-        if (auto_flush && !impl->double_buffered) {
-            esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y,
-                                                  dirty_w, dirty_h);
-            if (ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError,
-                    MP_ERROR_TEXT("Failed to draw text: %s"), esp_err_to_name(ret));
+    if (mark_dirty) {
+        mp_int_t dirty_x = x, dirty_y = y, dirty_w = glyph_w, dirty_h = glyph_h;
+        if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
+            mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
+            if (auto_flush && !impl->double_buffered &&
+                self->buffer_mode != RM690B0_BUFFER_SINGLE) {
+                esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y,
+                                                      dirty_w, dirty_h);
+                if (ret != ESP_OK) {
+                    mp_raise_msg_varg(&mp_type_RuntimeError,
+                        MP_ERROR_TEXT("Failed to draw text: %s"), esp_err_to_name(ret));
+                }
             }
         }
     }
@@ -198,38 +201,38 @@ static void rm690b0_draw_glyph_impl(
 // Thin wrappers — pass compile-time constants so GCC can fully optimize impl
 static inline void rm690b0_draw_glyph_8x8(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 8, 8);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 8, 8);
 }
 static inline void rm690b0_draw_glyph_16x16(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 16, 16);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 16, 16);
 }
 static inline void rm690b0_draw_glyph_16x24(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 16, 24);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 16, 24);
 }
 static inline void rm690b0_draw_glyph_24x24(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 24, 24);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 24, 24);
 }
 static inline void rm690b0_draw_glyph_24x32(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 24, 32);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 24, 32);
 }
 static inline void rm690b0_draw_glyph_32x32(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 32, 32);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 32, 32);
 }
 static inline void rm690b0_draw_glyph_32x48(
     rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y,
-    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool auto_flush) {
-    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, auto_flush, 32, 48);
+    const uint8_t *glyph, uint16_t fg, bool has_bg, uint16_t bg, bool mark_dirty, bool auto_flush) {
+    rm690b0_draw_glyph_impl(self, x, y, glyph, fg, has_bg, bg, mark_dirty, auto_flush, 32, 48);
 }
 
 // ============================================================================
@@ -337,87 +340,98 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
-    mp_int_t min_x = x;
-    mp_int_t max_x = x;
-    mp_int_t min_y = y;
-    mp_int_t max_y = rm690b0_add_mp_int_saturating(y, font_height);
+    mp_int_t min_x = 0;
+    mp_int_t max_x = 0;
+    mp_int_t min_y = 0;
+    mp_int_t max_y = 0;
+    bool dirty_valid = false;
 
     for (size_t i = 0; i < text_len; i++) {
         uint8_t ch = (uint8_t)text[i];
 
-        if (cursor_x < min_x) {
-            min_x = cursor_x;
-        }
-
         if (ch == '\n') {
             cursor_x = x;
             cursor_y = rm690b0_add_mp_int_saturating(cursor_y, font_height);
-            mp_int_t line_bottom = rm690b0_add_mp_int_saturating(cursor_y, font_height);
-            if (line_bottom > max_y) {
-                max_y = line_bottom;
-            }
             continue;
         } else if (ch == '\r') {
             continue;
         }
 
+        mp_int_t glyph_left = cursor_x;
+        mp_int_t glyph_top = cursor_y;
+        mp_int_t glyph_right = rm690b0_add_mp_int_saturating(cursor_x, font_width);
+        mp_int_t glyph_bottom = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+
+        if (!dirty_valid) {
+            min_x = glyph_left;
+            min_y = glyph_top;
+            max_x = glyph_right;
+            max_y = glyph_bottom;
+            dirty_valid = true;
+        } else {
+            if (glyph_left < min_x) {
+                min_x = glyph_left;
+            }
+            if (glyph_top < min_y) {
+                min_y = glyph_top;
+            }
+            if (glyph_right > max_x) {
+                max_x = glyph_right;
+            }
+            if (glyph_bottom > max_y) {
+                max_y = glyph_bottom;
+            }
+        }
+
         switch (font_id) {
             case RM690B0_FONT_16x16_MONO: {
                 const uint8_t *glyph = rm690b0_get_16x16_glyph(ch);
-                rm690b0_draw_glyph_16x16(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_16x16(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
             case RM690B0_FONT_16x24_MONO: {
                 const uint8_t *glyph = rm690b0_get_16x24_glyph(ch);
-                rm690b0_draw_glyph_16x24(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_16x24(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
             case RM690B0_FONT_24x24_MONO: {
                 const uint8_t *glyph = rm690b0_get_24x24_glyph(ch);
-                rm690b0_draw_glyph_24x24(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_24x24(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
             case RM690B0_FONT_24x32_MONO: {
                 const uint8_t *glyph = rm690b0_get_24x32_glyph(ch);
-                rm690b0_draw_glyph_24x32(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_24x32(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
             case RM690B0_FONT_32x32_MONO: {
                 const uint8_t *glyph = rm690b0_get_32x32_glyph(ch);
-                rm690b0_draw_glyph_32x32(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_32x32(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
             case RM690B0_FONT_32x48_MONO: {
                 const uint8_t *glyph = rm690b0_get_32x48_glyph(ch);
-                rm690b0_draw_glyph_32x48(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_32x48(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
             default: { // RM690B0_FONT_8x8_MONO
                 const uint8_t *glyph = rm690b0_get_8x8_glyph(ch);
-                rm690b0_draw_glyph_8x8(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false);
+                rm690b0_draw_glyph_8x8(self, cursor_x, cursor_y, glyph, fg, has_bg, bg, false, false);
                 break;
             }
         }
         cursor_x = rm690b0_add_mp_int_saturating(cursor_x, font_width);
 
-        if (cursor_x > max_x) {
-            max_x = cursor_x;
-        }
-
         if (cursor_x >= self->width) {
             cursor_x = x;
             cursor_y = rm690b0_add_mp_int_saturating(cursor_y, font_height);
-            mp_int_t line_bottom = rm690b0_add_mp_int_saturating(cursor_y, font_height);
-            if (line_bottom > max_y) {
-                max_y = line_bottom;
-            }
         }
         if (cursor_y >= self->height) {
             break;
         }
     }
 
-    if (!impl->double_buffered) {
+    if (dirty_valid) {
         mp_int_t dirty_x = min_x;
         mp_int_t dirty_y = min_y;
         mp_int_t dirty_w = max_x - min_x;
@@ -425,13 +439,20 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
 
         if (dirty_w > 0 && dirty_h > 0) {
             if (map_rect_for_rotation(self, &dirty_x, &dirty_y, &dirty_w, &dirty_h)) {
-                esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h);
-                if (ret != ESP_OK) {
-                    mp_raise_msg_varg(&mp_type_RuntimeError,
-                        MP_ERROR_TEXT("Failed to draw text: %s"), esp_err_to_name(ret));
+                if (impl->double_buffered || self->buffer_mode == RM690B0_BUFFER_SINGLE) {
+                    mark_dirty_region(impl, dirty_x, dirty_y, dirty_w, dirty_h);
+                } else {
+                    esp_err_t ret = rm690b0_flush_region(self, dirty_x, dirty_y, dirty_w, dirty_h);
+                    if (ret != ESP_OK) {
+                        mp_raise_msg_varg(&mp_type_RuntimeError,
+                            MP_ERROR_TEXT("Failed to draw text: %s"), esp_err_to_name(ret));
+                    }
                 }
             }
         }
+    }
+
+    if (!impl->double_buffered && self->buffer_mode != RM690B0_BUFFER_SINGLE) {
         impl->dirty_count = 0;
         impl->dirty_merged_valid = false;
     }

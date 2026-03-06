@@ -24,7 +24,7 @@ void common_hal_rm690b0_rm690b0_fill_color(rm690b0_rm690b0_obj_t *self, uint16_t
     }
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl != NULL && !impl->double_buffered) {
+    if (impl != NULL && !impl->double_buffered && self->buffer_mode != RM690B0_BUFFER_SINGLE) {
         rm690b0_fill_color_direct(self, color);
         return;
     }
@@ -109,7 +109,8 @@ void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t 
         return;
     }
 
-    if (!impl->double_buffered && bx == 0 && bw == RM690B0_PANEL_WIDTH) {
+    if (!impl->double_buffered && self->buffer_mode != RM690B0_BUFFER_SINGLE &&
+        bx == 0 && bw == RM690B0_PANEL_WIDTH) {
         esp_err_t direct_ret = rm690b0_fill_rect_direct_fullwidth(self, by, bh, swapped_color);
         if (direct_ret == ESP_OK) {
             impl->dirty_count = 0;
@@ -655,6 +656,41 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
 // blit_buffer
 // ============================================================================
 
+static inline void rm690b0_blit_transparent_row_swapped(uint16_t *dst_row,
+    const uint16_t *src_row, mp_int_t width, uint16_t transp) {
+    mp_int_t col = 0;
+    while (col < width) {
+        while (col < width && src_row[col] == transp) {
+            col++;
+        }
+        mp_int_t run_start = col;
+        while (col < width && src_row[col] != transp) {
+            col++;
+        }
+        mp_int_t run_len = col - run_start;
+        if (run_len > 0) {
+            memcpy(dst_row + run_start, src_row + run_start, (size_t)run_len * sizeof(uint16_t));
+        }
+    }
+}
+
+static inline void rm690b0_blit_transparent_row_unswapped(uint16_t *dst_row,
+    const uint16_t *src_row, mp_int_t width, uint16_t transp) {
+    mp_int_t col = 0;
+    while (col < width) {
+        while (col < width && src_row[col] == transp) {
+            col++;
+        }
+        mp_int_t run_start = col;
+        while (col < width && src_row[col] != transp) {
+            col++;
+        }
+        for (mp_int_t i = run_start; i < col; i++) {
+            dst_row[i] = RGB565_SWAP_GB(src_row[i]);
+        }
+    }
+}
+
 void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_int_t width, mp_int_t height, mp_obj_t bitmap_data, bool dest_is_swapped, mp_int_t transparent_color, mp_int_t src_x1, mp_int_t src_y1, mp_int_t src_x2, mp_int_t src_y2) {
     CHECK_INITIALIZED();
 
@@ -761,16 +797,14 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
 
                 if (!has_transparency && dest_is_swapped) {
                     memcpy(dst_row, src_row, logical_w * sizeof(uint16_t));
-                } else {
+                } else if (!has_transparency && !dest_is_swapped) {
                     for (mp_int_t col = 0; col < logical_w; col++) {
-                        uint16_t val = src_row[col];
-
-                        if (has_transparency && val == transp) {
-                            continue;
-                        }
-
-                        dst_row[col] = dest_is_swapped ? val : RGB565_SWAP_GB(val);
+                        dst_row[col] = RGB565_SWAP_GB(src_row[col]);
                     }
+                } else if (has_transparency && dest_is_swapped) {
+                    rm690b0_blit_transparent_row_swapped(dst_row, src_row, logical_w, transp);
+                } else {
+                    rm690b0_blit_transparent_row_unswapped(dst_row, src_row, logical_w, transp);
                 }
             }
             break;

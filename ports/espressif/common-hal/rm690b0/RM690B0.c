@@ -423,6 +423,200 @@ static bool rm690b0_try_flush_region(
 // Dirty region tracking
 // ============================================================================
 
+#define RM690B0_DIRTY_TRANSFER_OVERHEAD_PIXELS      (4096u)
+#define RM690B0_DIRTY_COALESCE_GAP_PIXELS           (2)
+#define RM690B0_DIRTY_COALESCE_EXTRA_LIMIT_PIXELS   (4096u)
+
+typedef struct {
+    rm690b0_dirty_rect_t rects[RM690B0_MAX_DIRTY_RECTS];
+    size_t rect_count;
+    rm690b0_dirty_rect_t merged_rect;
+    bool use_merged;
+} rm690b0_dirty_flush_plan_t;
+
+static inline bool rm690b0_dirty_rect_is_valid(const rm690b0_dirty_rect_t *rect) {
+    return rect != NULL && rect->w > 0 && rect->h > 0;
+}
+
+static uint64_t rm690b0_dirty_rect_area_u64(const rm690b0_dirty_rect_t *rect) {
+    if (!rm690b0_dirty_rect_is_valid(rect)) {
+        return 0;
+    }
+    return (uint64_t)(size_t)rect->w * (uint64_t)(size_t)rect->h;
+}
+
+static rm690b0_dirty_rect_t rm690b0_dirty_rect_union(
+    const rm690b0_dirty_rect_t *a,
+    const rm690b0_dirty_rect_t *b) {
+
+    rm690b0_dirty_rect_t out = {0, 0, 0, 0};
+    if (!rm690b0_dirty_rect_is_valid(a)) {
+        return *b;
+    }
+    if (!rm690b0_dirty_rect_is_valid(b)) {
+        return *a;
+    }
+
+    mp_int_t ax2 = rm690b0_add_mp_int_saturating(a->x, a->w);
+    mp_int_t ay2 = rm690b0_add_mp_int_saturating(a->y, a->h);
+    mp_int_t bx2 = rm690b0_add_mp_int_saturating(b->x, b->w);
+    mp_int_t by2 = rm690b0_add_mp_int_saturating(b->y, b->h);
+
+    out.x = (a->x < b->x) ? a->x : b->x;
+    out.y = (a->y < b->y) ? a->y : b->y;
+    mp_int_t out_x2 = (ax2 > bx2) ? ax2 : bx2;
+    mp_int_t out_y2 = (ay2 > by2) ? ay2 : by2;
+    out.w = out_x2 - out.x;
+    out.h = out_y2 - out.y;
+    return out;
+}
+
+static void rm690b0_dirty_rect_distance(
+    const rm690b0_dirty_rect_t *a,
+    const rm690b0_dirty_rect_t *b,
+    mp_int_t *out_dx,
+    mp_int_t *out_dy) {
+
+    mp_int_t ax2 = rm690b0_add_mp_int_saturating(a->x, a->w);
+    mp_int_t ay2 = rm690b0_add_mp_int_saturating(a->y, a->h);
+    mp_int_t bx2 = rm690b0_add_mp_int_saturating(b->x, b->w);
+    mp_int_t by2 = rm690b0_add_mp_int_saturating(b->y, b->h);
+
+    if (ax2 < b->x) {
+        *out_dx = b->x - ax2;
+    } else if (bx2 < a->x) {
+        *out_dx = a->x - bx2;
+    } else {
+        *out_dx = 0;
+    }
+
+    if (ay2 < b->y) {
+        *out_dy = b->y - ay2;
+    } else if (by2 < a->y) {
+        *out_dy = a->y - by2;
+    } else {
+        *out_dy = 0;
+    }
+}
+
+static bool rm690b0_should_merge_dirty_rects(
+    const rm690b0_dirty_rect_t *a,
+    const rm690b0_dirty_rect_t *b) {
+
+    if (!rm690b0_dirty_rect_is_valid(a) || !rm690b0_dirty_rect_is_valid(b)) {
+        return false;
+    }
+
+    mp_int_t dx = 0;
+    mp_int_t dy = 0;
+    rm690b0_dirty_rect_distance(a, b, &dx, &dy);
+
+    if (dx == 0 && dy == 0) {
+        return true;
+    }
+    if (dx > RM690B0_DIRTY_COALESCE_GAP_PIXELS ||
+        dy > RM690B0_DIRTY_COALESCE_GAP_PIXELS) {
+        return false;
+    }
+
+    uint64_t area_sum = rm690b0_dirty_rect_area_u64(a) + rm690b0_dirty_rect_area_u64(b);
+    rm690b0_dirty_rect_t union_rect = rm690b0_dirty_rect_union(a, b);
+    uint64_t union_area = rm690b0_dirty_rect_area_u64(&union_rect);
+
+    uint64_t max_extra = (area_sum >> 2); // +25%
+    if (max_extra > RM690B0_DIRTY_COALESCE_EXTRA_LIMIT_PIXELS) {
+        max_extra = RM690B0_DIRTY_COALESCE_EXTRA_LIMIT_PIXELS;
+    }
+    return union_area <= (area_sum + max_extra);
+}
+
+static size_t rm690b0_coalesce_dirty_rects(rm690b0_dirty_rect_t *rects, size_t count) {
+    if (count < 2) {
+        return count;
+    }
+
+    bool merged_any = true;
+    while (merged_any && count > 1) {
+        merged_any = false;
+        for (size_t i = 0; i < count; i++) {
+            for (size_t j = i + 1; j < count; j++) {
+                if (!rm690b0_should_merge_dirty_rects(&rects[i], &rects[j])) {
+                    continue;
+                }
+                rects[i] = rm690b0_dirty_rect_union(&rects[i], &rects[j]);
+                rects[j] = rects[count - 1];
+                count--;
+                merged_any = true;
+                goto next_pass;
+            }
+        }
+next_pass:
+        ;
+    }
+    return count;
+}
+
+static bool rm690b0_build_dirty_flush_plan(
+    const rm690b0_impl_t *impl,
+    rm690b0_dirty_flush_plan_t *plan) {
+
+    if (impl == NULL || plan == NULL) {
+        return false;
+    }
+
+    memset(plan, 0, sizeof(*plan));
+
+    for (size_t i = 0; i < impl->dirty_count && plan->rect_count < RM690B0_MAX_DIRTY_RECTS; i++) {
+        rm690b0_dirty_rect_t rect = impl->dirty_rects[i];
+        if (!rm690b0_dirty_rect_is_valid(&rect)) {
+            continue;
+        }
+        plan->rects[plan->rect_count++] = rect;
+    }
+
+    if (plan->rect_count == 0) {
+        if (!impl->dirty_merged_valid) {
+            return false;
+        }
+        rm690b0_dirty_rect_t merged = {
+            impl->dirty_merged_x,
+            impl->dirty_merged_y,
+            impl->dirty_merged_w,
+            impl->dirty_merged_h,
+        };
+        if (!rm690b0_dirty_rect_is_valid(&merged)) {
+            return false;
+        }
+        plan->merged_rect = merged;
+        plan->use_merged = true;
+        return true;
+    }
+
+    plan->rect_count = rm690b0_coalesce_dirty_rects(plan->rects, plan->rect_count);
+    if (plan->rect_count == 0) {
+        return false;
+    }
+
+    plan->merged_rect = plan->rects[0];
+    uint64_t individual_area = rm690b0_dirty_rect_area_u64(&plan->rects[0]);
+    for (size_t i = 1; i < plan->rect_count; i++) {
+        plan->merged_rect = rm690b0_dirty_rect_union(&plan->merged_rect, &plan->rects[i]);
+        individual_area += rm690b0_dirty_rect_area_u64(&plan->rects[i]);
+    }
+
+    if (plan->rect_count == 1) {
+        plan->use_merged = true;
+        return true;
+    }
+
+    uint64_t merged_area = rm690b0_dirty_rect_area_u64(&plan->merged_rect);
+    uint64_t individual_cost = individual_area +
+        ((uint64_t)plan->rect_count * RM690B0_DIRTY_TRANSFER_OVERHEAD_PIXELS);
+    uint64_t merged_cost = merged_area + RM690B0_DIRTY_TRANSFER_OVERHEAD_PIXELS;
+    plan->use_merged = merged_cost <= individual_cost;
+    return true;
+}
+
 void mark_dirty_region(rm690b0_impl_t *impl, mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h) {
     if (w <= 0 || h <= 0) {
         return;
@@ -540,6 +734,14 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     }
 
     size_t max_chunk_pixels = fw_sz * chunk_height;
+    mp_int_t src_x2 = 0;
+    mp_int_t src_y2 = 0;
+    bool source_in_bounds =
+        x >= 0 && y >= 0 && width > 0 && height > 0 &&
+        rm690b0_add_mp_int_checked(x, width, &src_x2) &&
+        rm690b0_add_mp_int_checked(y, height, &src_y2) &&
+        src_x2 <= RM690B0_PANEL_WIDTH &&
+        src_y2 <= RM690B0_PANEL_HEIGHT;
 
     bool use_static_buffers = false;
     uint16_t *alloc_buffer = NULL;
@@ -604,6 +806,16 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
                 size_t chunk_bytes = rows_this_chunk * bytes_per_row;
                 const uint16_t *src = framebuffer + (size_t)start_y * fb_stride;
                 memcpy(current_buffer, src, chunk_bytes);
+            } else if (source_in_bounds) {
+                // Fast path: source rect is fully in-bounds, so expanded flush rows
+                // can be copied directly from framebuffer without per-column loops.
+                const uint16_t *src = framebuffer + (size_t)start_y * fb_stride + (size_t)fx;
+                size_t row_bytes = fw_sz * sizeof(uint16_t);
+                size_t dest_index = 0;
+                for (size_t row = 0; row < rows_this_chunk; row++) {
+                    memcpy(&current_buffer[dest_index], src + row * fb_stride, row_bytes);
+                    dest_index += fw_sz;
+                }
             } else {
                 mp_int_t flush_end_x = rm690b0_add_mp_int_saturating(fx, fw);
                 mp_int_t src_left = x;
@@ -1733,31 +1945,29 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     }
 
     if (!impl->double_buffered || impl->framebuffer_front == NULL) {
-        if (impl->dirty_count > 0) {
-            size_t individual_area = 0;
-            for (size_t i = 0; i < impl->dirty_count; i++) {
-                individual_area += (size_t)impl->dirty_rects[i].w * (size_t)impl->dirty_rects[i].h;
-            }
-            size_t merged_area = (size_t)impl->dirty_merged_w * (size_t)impl->dirty_merged_h;
-
-            esp_err_t ret;
-            if (merged_area > individual_area * 3 / 2) {
-                for (size_t i = 0; i < impl->dirty_count; i++) {
-                    rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
-                    ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
+        rm690b0_dirty_flush_plan_t dirty_plan;
+        if (rm690b0_build_dirty_flush_plan(impl, &dirty_plan)) {
+            if (dirty_plan.use_merged) {
+                esp_err_t ret = rm690b0_flush_region(
+                    self,
+                    dirty_plan.merged_rect.x,
+                    dirty_plan.merged_rect.y,
+                    dirty_plan.merged_rect.w,
+                    dirty_plan.merged_rect.h);
+                if (ret != ESP_OK) {
+                    mp_raise_msg_varg(&mp_type_RuntimeError,
+                        MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                        esp_err_to_name(ret), ret);
+                }
+            } else {
+                for (size_t i = 0; i < dirty_plan.rect_count; i++) {
+                    rm690b0_dirty_rect_t *r = &dirty_plan.rects[i];
+                    esp_err_t ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
                     if (ret != ESP_OK) {
                         mp_raise_msg_varg(&mp_type_RuntimeError,
                             MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
                             esp_err_to_name(ret), ret);
                     }
-                }
-            } else {
-                ret = rm690b0_flush_region(self, impl->dirty_merged_x, impl->dirty_merged_y,
-                                           impl->dirty_merged_w, impl->dirty_merged_h);
-                if (ret != ESP_OK) {
-                    mp_raise_msg_varg(&mp_type_RuntimeError,
-                        MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
-                        esp_err_to_name(ret), ret);
                 }
             }
         }
@@ -1780,17 +1990,22 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     rm690b0_dirty_rect_t copy_rects[RM690B0_MAX_DIRTY_RECTS];
     size_t copy_rect_count = 0;
 
-    if (impl->dirty_count > 0) {
-        size_t individual_area = 0;
-        for (size_t i = 0; i < impl->dirty_count; i++) {
-            individual_area += (size_t)impl->dirty_rects[i].w * (size_t)impl->dirty_rects[i].h;
-        }
-        size_t merged_area = (size_t)impl->dirty_merged_w * (size_t)impl->dirty_merged_h;
-
-        if (merged_area > individual_area * 3 / 2) {
-            copy_full_frame = false;
-            for (size_t i = 0; i < impl->dirty_count; i++) {
-                rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
+    rm690b0_dirty_flush_plan_t dirty_plan;
+    if (rm690b0_build_dirty_flush_plan(impl, &dirty_plan)) {
+        copy_full_frame = false;
+        if (dirty_plan.use_merged) {
+            rm690b0_dirty_rect_t *r = &dirty_plan.merged_rect;
+            copy_rects[0] = *r;
+            copy_rect_count = 1;
+            esp_err_t ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
+            if (ret != ESP_OK) {
+                mp_raise_msg_varg(&mp_type_RuntimeError,
+                    MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
+                    esp_err_to_name(ret), ret);
+            }
+        } else {
+            for (size_t i = 0; i < dirty_plan.rect_count; i++) {
+                rm690b0_dirty_rect_t *r = &dirty_plan.rects[i];
                 if (copy_rect_count < RM690B0_MAX_DIRTY_RECTS) {
                     copy_rects[copy_rect_count++] = *r;
                 }
@@ -1800,20 +2015,6 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                         MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
                         esp_err_to_name(ret), ret);
                 }
-            }
-        } else {
-            copy_full_frame = false;
-            flush_x = impl->dirty_merged_x;
-            flush_y = impl->dirty_merged_y;
-            flush_w = impl->dirty_merged_w;
-            flush_h = impl->dirty_merged_h;
-            copy_rects[0] = (rm690b0_dirty_rect_t){flush_x, flush_y, flush_w, flush_h};
-            copy_rect_count = 1;
-            esp_err_t ret = rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
-            if (ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError,
-                    MP_ERROR_TEXT("Failed to refresh display: %s (0x%x)"),
-                    esp_err_to_name(ret), ret);
             }
         }
     } else {

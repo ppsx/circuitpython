@@ -730,6 +730,9 @@ static inline esp_err_t rm690b0_finalize_draw(
     mp_int_t phys_x, mp_int_t phys_y, mp_int_t phys_w, mp_int_t phys_h) {
     mark_dirty_region(impl, phys_x, phys_y, phys_w, phys_h);
     if (!impl->double_buffered) {
+        if (self->buffer_mode == RM690B0_BUFFER_SINGLE) {
+            return ESP_OK;
+        }
         esp_err_t ret = rm690b0_flush_region(self, phys_x, phys_y, phys_w, phys_h);
         if (ret == ESP_OK) {
             impl->dirty_count = 0;
