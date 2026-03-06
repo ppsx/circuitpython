@@ -195,6 +195,80 @@ static size_t rm690b0_align_up_size(size_t value, size_t alignment) {
     return (value + mask) & ~mask;
 }
 
+static size_t rm690b0_normalize_chunk_rows(size_t rows, size_t max_rows, size_t frame_rows) {
+    if (max_rows == 0) {
+        max_rows = 1;
+    }
+    if (frame_rows == 0) {
+        frame_rows = 1;
+    }
+
+    if (rows == 0 || rows > max_rows) {
+        rows = max_rows;
+    }
+    if (rows > frame_rows) {
+        rows = frame_rows;
+    }
+    if (rows == 0) {
+        rows = 1;
+    }
+
+    if ((rows & 1U) != 0U) {
+        if (rows < frame_rows && rows < max_rows) {
+            rows += 1;
+        } else if (rows > 1) {
+            rows -= 1;
+        }
+    }
+
+    if (rows == 0) {
+        rows = 1;
+    }
+    return rows;
+}
+
+static size_t rm690b0_choose_flush_chunk_rows(
+    const rm690b0_impl_t *impl,
+    size_t flush_width,
+    size_t flush_height,
+    size_t max_chunk_rows,
+    bool direct_dma) {
+
+    if (flush_height == 0) {
+        return 1;
+    }
+
+    size_t rows = flush_height;
+    if (rows > max_chunk_rows) {
+        rows = max_chunk_rows;
+    }
+
+    bool can_overlap_prepare_with_dma = !direct_dma &&
+        impl != NULL &&
+        impl->double_buffered &&
+        impl->chunk_buffers[0] != NULL &&
+        impl->chunk_buffers[1] != NULL;
+
+    if (can_overlap_prepare_with_dma && flush_width > 0) {
+        size_t target_bytes = (flush_width == RM690B0_PANEL_WIDTH)
+            ? RM690B0_FB_FLUSH_TARGET_BYTES_FULLWIDTH
+            : RM690B0_FB_FLUSH_TARGET_BYTES_PARTIAL;
+
+        size_t bytes_per_row = flush_width * sizeof(uint16_t);
+        if (bytes_per_row > 0) {
+            size_t target_rows = target_bytes / bytes_per_row;
+            if (target_rows == 0) {
+                target_rows = 1;
+            }
+            if (rows > target_rows) {
+                rows = target_rows;
+            }
+        }
+    }
+
+    return rm690b0_normalize_chunk_rows(rows, max_chunk_rows, flush_height);
+}
+
 static uint16_t *rm690b0_alloc_framebuffer_bytes(size_t framebuffer_bytes) {
     size_t aligned_bytes = rm690b0_align_up_size(framebuffer_bytes, RM690B0_FB_DMA_ALIGNMENT);
     uint16_t *framebuffer = heap_caps_aligned_alloc(
@@ -717,21 +791,8 @@ esp_err_t rm690b0_flush_region(rm690b0_rm690b0_obj_t *self,
     if (max_chunk_height == 0) {
         max_chunk_height = 1;
     }
-
-    size_t chunk_height = fh_sz;
-    if (chunk_height > max_chunk_height) {
-        chunk_height = max_chunk_height;
-    }
-    if (chunk_height == 0) {
-        chunk_height = 1;
-    }
-    if (chunk_height & 1) {
-        if (chunk_height < fh_sz) {
-            chunk_height += 1;
-        } else if (chunk_height > 1) {
-            chunk_height -= 1;
-        }
-    }
+    size_t chunk_height = rm690b0_choose_flush_chunk_rows(
+        impl, fw_sz, fh_sz, max_chunk_height, direct_dma);
 
     size_t max_chunk_pixels = fw_sz * chunk_height;
     mp_int_t src_x2 = 0;
