@@ -183,6 +183,205 @@ static const rm690b0_lcd_init_cmd_t lcd_init_cmds[] = {
 // tx_param helper
 // ============================================================================
 
+// Keep framebuffer allocations/copies alignment-friendly for GDMA-based memcpy.
+#define RM690B0_FB_DMA_ALIGNMENT      (16)
+#define RM690B0_FB_COPY_TIMEOUT_MS    (1000)
+
+static size_t rm690b0_align_up_size(size_t value, size_t alignment) {
+    if (alignment == 0) {
+        return value;
+    }
+    size_t mask = alignment - 1;
+    return (value + mask) & ~mask;
+}
+
+static uint16_t *rm690b0_alloc_framebuffer_bytes(size_t framebuffer_bytes) {
+    size_t aligned_bytes = rm690b0_align_up_size(framebuffer_bytes, RM690B0_FB_DMA_ALIGNMENT);
+    uint16_t *framebuffer = heap_caps_aligned_alloc(
+        RM690B0_FB_DMA_ALIGNMENT,
+        aligned_bytes,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    if (framebuffer != NULL) {
+        return framebuffer;
+    }
+
+    // Fallback keeps previous behavior if aligned allocation fails.
+    return heap_caps_malloc(framebuffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+#if SOC_ASYNC_MEMCPY_SUPPORTED
+static bool IRAM_ATTR rm690b0_on_fb_copy_done(
+    async_memcpy_handle_t mcp_hdl,
+    async_memcpy_event_t *event,
+    void *cb_args) {
+    (void)mcp_hdl;
+    (void)event;
+
+    SemaphoreHandle_t done_sem = (SemaphoreHandle_t)cb_args;
+    BaseType_t high_task_awoken = pdFALSE;
+    if (done_sem != NULL) {
+        xSemaphoreGiveFromISR(done_sem, &high_task_awoken);
+    }
+    return high_task_awoken == pdTRUE;
+}
+
+static void rm690b0_release_fb_copy_dma(rm690b0_impl_t *impl) {
+    if (impl == NULL) {
+        return;
+    }
+
+    if (impl->fb_copy_dma_handle != NULL) {
+        esp_err_t ret = esp_async_memcpy_uninstall(impl->fb_copy_dma_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to uninstall framebuffer-copy DMA handle: %s",
+                esp_err_to_name(ret));
+        }
+        impl->fb_copy_dma_handle = NULL;
+    }
+
+    if (impl->fb_copy_done_sem != NULL) {
+        vSemaphoreDelete(impl->fb_copy_done_sem);
+        impl->fb_copy_done_sem = NULL;
+    }
+
+    impl->fb_copy_dma_disabled = false;
+}
+
+static bool rm690b0_try_init_fb_copy_dma(rm690b0_impl_t *impl) {
+    if (impl == NULL || impl->fb_copy_dma_disabled) {
+        return false;
+    }
+    if (impl->fb_copy_dma_handle != NULL) {
+        return true;
+    }
+
+    if (impl->fb_copy_done_sem == NULL) {
+        impl->fb_copy_done_sem = xSemaphoreCreateBinary();
+        if (impl->fb_copy_done_sem == NULL) {
+            ESP_LOGW(TAG, "Unable to create framebuffer-copy DMA semaphore; using CPU memcpy");
+            impl->fb_copy_dma_disabled = true;
+            return false;
+        }
+    }
+
+    async_memcpy_config_t cfg = ASYNC_MEMCPY_DEFAULT_CONFIG();
+    cfg.backlog = 1;
+
+    esp_err_t ret = esp_async_memcpy_install(&cfg, &impl->fb_copy_dma_handle);
+    if (ret != ESP_OK || impl->fb_copy_dma_handle == NULL) {
+        ESP_LOGW(TAG, "Unable to initialize framebuffer-copy DMA (%s); using CPU memcpy",
+            esp_err_to_name(ret));
+        rm690b0_release_fb_copy_dma(impl);
+        impl->fb_copy_dma_disabled = true;
+        return false;
+    }
+
+    return true;
+}
+
+static bool rm690b0_try_copy_framebuffer_dma(
+    rm690b0_impl_t *impl,
+    void *dst,
+    const void *src,
+    size_t bytes) {
+
+    if (bytes == 0 || dst == NULL || src == NULL) {
+        return true;
+    }
+
+    if (!rm690b0_try_init_fb_copy_dma(impl)) {
+        return false;
+    }
+
+    while (xSemaphoreTake(impl->fb_copy_done_sem, 0) == pdTRUE) {
+        // Drain stale completion tokens before enqueuing a fresh transaction.
+    }
+
+    esp_err_t ret = esp_async_memcpy(
+        impl->fb_copy_dma_handle,
+        dst,
+        (void *)src,
+        bytes,
+        rm690b0_on_fb_copy_done,
+        impl->fb_copy_done_sem);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Framebuffer DMA copy request rejected (%s); switching to CPU memcpy",
+            esp_err_to_name(ret));
+        rm690b0_release_fb_copy_dma(impl);
+        impl->fb_copy_dma_disabled = true;
+        return false;
+    }
+
+    if (xSemaphoreTake(impl->fb_copy_done_sem, pdMS_TO_TICKS(RM690B0_FB_COPY_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "Framebuffer DMA copy timed out; falling back to CPU memcpy");
+        rm690b0_release_fb_copy_dma(impl);
+        impl->fb_copy_dma_disabled = true;
+        return false;
+    }
+
+    return true;
+}
+#else
+static void rm690b0_release_fb_copy_dma(rm690b0_impl_t *impl) {
+    (void)impl;
+}
+
+static bool rm690b0_try_copy_framebuffer_dma(
+    rm690b0_impl_t *impl,
+    void *dst,
+    const void *src,
+    size_t bytes) {
+    (void)impl;
+    (void)dst;
+    (void)src;
+    (void)bytes;
+    return false;
+}
+#endif
+
+static void rm690b0_copy_framebuffer_region(
+    rm690b0_impl_t *impl,
+    uint16_t *dst,
+    const uint16_t *src,
+    mp_int_t x,
+    mp_int_t y,
+    mp_int_t width,
+    mp_int_t height) {
+
+    if (dst == NULL || src == NULL || width <= 0 || height <= 0) {
+        return;
+    }
+
+    mp_int_t copy_x = x;
+    mp_int_t copy_y = y;
+    mp_int_t copy_w = width;
+    mp_int_t copy_h = height;
+    if (!expand_even_region(&copy_x, &copy_y, &copy_w, &copy_h)) {
+        return;
+    }
+
+    const size_t fb_stride = RM690B0_PANEL_WIDTH;
+    const size_t row_bytes = (size_t)copy_w * sizeof(uint16_t);
+    uint16_t *dst_base = dst + (size_t)copy_y * fb_stride + (size_t)copy_x;
+    const uint16_t *src_base = src + (size_t)copy_y * fb_stride + (size_t)copy_x;
+
+    if (copy_x == 0 && copy_w == RM690B0_PANEL_WIDTH) {
+        size_t copy_bytes = (size_t)copy_h * row_bytes;
+        if (!rm690b0_try_copy_framebuffer_dma(impl, dst_base, src_base, copy_bytes)) {
+            memcpy(dst_base, src_base, copy_bytes);
+        }
+        return;
+    }
+
+    for (mp_int_t row = 0; row < copy_h; row++) {
+        uint16_t *dst_row = dst_base + (size_t)row * fb_stride;
+        const uint16_t *src_row = src_base + (size_t)row * fb_stride;
+        memcpy(dst_row, src_row, row_bytes);
+    }
+}
+
 static esp_err_t rm690b0_tx_param(const rm690b0_impl_t *impl, uint8_t cmd, const void *param, size_t param_size) {
     if (impl == NULL || impl->io_handle == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -688,6 +887,7 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     self->brightness_raw = 0xFF;
     self->font_id = RM690B0_FONT_8x8_MONO;
     self->buffer_mode = RM690B0_BUFFER_DOUBLE;
+    self->render_mode = RM690B0_RENDER_FRAMEBUFFER;
     self->impl = m_malloc(sizeof(rm690b0_impl_t));
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     memset(impl, 0, sizeof(rm690b0_impl_t));
@@ -702,11 +902,17 @@ void common_hal_rm690b0_rm690b0_construct(rm690b0_rm690b0_obj_t *self) {
     impl->framebuffer_front = NULL;
     impl->double_buffered = false;
     impl->front_buffer_alloc_failed = false;
+#if SOC_ASYNC_MEMCPY_SUPPORTED
+    impl->fb_copy_dma_handle = NULL;
+    impl->fb_copy_done_sem = NULL;
+    impl->fb_copy_dma_disabled = false;
+#endif
     impl->circle_span_cache = NULL;
     impl->circle_span_capacity = 0;
 
     impl->dirty_count = 0;
     impl->dirty_merged_valid = false;
+    rm690b0_dl_init_state(impl);
 
     impl->transfer_done_sem = xSemaphoreCreateCounting(RM690B0_PANEL_IO_QUEUE_DEPTH, 0);
     if (impl->transfer_done_sem == NULL) {
@@ -841,6 +1047,9 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         impl->circle_span_cache = NULL;
         impl->circle_span_capacity = 0;
     }
+
+    rm690b0_dl_deinit_state(impl);
+    rm690b0_release_fb_copy_dma(impl);
 
     if (impl->transfer_done_sem) {
         vSemaphoreDelete(impl->transfer_done_sem);
@@ -1076,13 +1285,15 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             size_t buf_size = buf_pixels * sizeof(uint16_t);
 
             impl->chunk_buffers[0] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
-            if (self->buffer_mode != RM690B0_BUFFER_SINGLE) {
+            impl->chunk_buffers[1] = NULL;
+            if (impl->chunk_buffers[0] != NULL) {
+                // Try to get a second DMA chunk buffer even in single framebuffer mode.
+                // In single mode this is optional (for better DMA/CPU overlap in DL).
                 impl->chunk_buffers[1] = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
-            } else {
-                impl->chunk_buffers[1] = NULL;
             }
 
-            if (impl->chunk_buffers[0] != NULL && (self->buffer_mode == RM690B0_BUFFER_SINGLE || impl->chunk_buffers[1] != NULL)) {
+            bool dual_required = self->buffer_mode != RM690B0_BUFFER_SINGLE;
+            if (impl->chunk_buffers[0] != NULL && (!dual_required || impl->chunk_buffers[1] != NULL)) {
                 impl->chunk_buffer_pixels = buf_pixels;
                 ESP_LOGI(TAG, "Allocated %s DMA chunk buffer(s) (%zu pixels each, %zu rows)",
                     impl->chunk_buffers[1] != NULL ? "dual" : "single", impl->chunk_buffer_pixels, current_chunk_rows);
@@ -1109,9 +1320,9 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     }
 
     size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
+    size_t framebuffer_bytes = framebuffer_pixels * sizeof(uint16_t);
     if (impl->framebuffer == NULL) {
-        impl->framebuffer = heap_caps_malloc(framebuffer_pixels * sizeof(uint16_t),
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        impl->framebuffer = rm690b0_alloc_framebuffer_bytes(framebuffer_bytes);
         if (impl->framebuffer == NULL) {
             ESP_LOGE(TAG, "Unable to allocate PSRAM framebuffer");
             goto cleanup;
@@ -1121,7 +1332,7 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             framebuffer_pixels, (framebuffer_pixels * sizeof(uint16_t)) / 1024);
     }
 
-    memset(impl->framebuffer, 0, framebuffer_pixels * sizeof(uint16_t));
+    memset(impl->framebuffer, 0, framebuffer_bytes);
     esp_err_t clear_ret = ESP_OK;
     bool flush_completed = rm690b0_try_flush_region(
         self, 0, 0, RM690B0_PANEL_WIDTH, RM690B0_PANEL_HEIGHT, &clear_ret);
@@ -1244,6 +1455,116 @@ mp_int_t common_hal_rm690b0_rm690b0_get_rotation(const rm690b0_rm690b0_obj_t *se
     return self->rotation;
 }
 
+void common_hal_rm690b0_rm690b0_set_render_mode(rm690b0_rm690b0_obj_t *self, mp_int_t mode) {
+    if (mode != RM690B0_RENDER_FRAMEBUFFER && mode != RM690B0_RENDER_DISPLAY_LIST) {
+        mp_raise_ValueError(MP_ERROR_TEXT("render_mode must be RENDER_FRAMEBUFFER or RENDER_DISPLAY_LIST"));
+        return;
+    }
+
+    if (self->render_mode == mode) {
+        return;
+    }
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
+        return;
+    }
+
+    if (!self->initialized) {
+        self->render_mode = mode;
+        return;
+    }
+
+    esp_err_t ret = rm690b0_dl_set_mode(self, mode);
+    if (ret != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to switch render mode: %s"), esp_err_to_name(ret));
+    }
+}
+
+mp_int_t common_hal_rm690b0_rm690b0_get_render_mode(const rm690b0_rm690b0_obj_t *self) {
+    return self->render_mode;
+}
+
+void common_hal_rm690b0_rm690b0_compact_display_list(rm690b0_rm690b0_obj_t *self) {
+    CHECK_INITIALIZED();
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
+        return;
+    }
+    if (self->render_mode != RM690B0_RENDER_DISPLAY_LIST) {
+        return;
+    }
+
+    rm690b0_wait_for_all_dma(impl);
+    esp_err_t ret = rm690b0_dl_compact(self);
+    if (ret != ESP_OK) {
+        mp_raise_msg_varg(&mp_type_RuntimeError,
+            MP_ERROR_TEXT("Failed to compact display list: %s"), esp_err_to_name(ret));
+    }
+}
+
+void common_hal_rm690b0_rm690b0_get_display_list_stats(rm690b0_rm690b0_obj_t *self, rm690b0_display_list_stats_t *out) {
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL) {
+        return;
+    }
+
+    const rm690b0_dl_state_t *dl = &impl->dl;
+    out->command_count = dl->count;
+    out->payload_bytes = dl->payload_bytes;
+    out->max_command_count = dl->telemetry_max_command_count;
+    out->max_payload_bytes = dl->telemetry_max_payload_bytes;
+    out->rejected_command_limit = dl->telemetry_rejected_command_limit;
+    out->rejected_payload_limit = dl->telemetry_rejected_payload_limit;
+    out->allocation_failures = dl->telemetry_allocation_failures;
+    out->present_count = dl->telemetry_present_count;
+    out->present_full = dl->telemetry_present_full;
+    out->present_partial = dl->telemetry_present_partial;
+    out->compact_count = dl->telemetry_compact_count;
+    out->compact_trimmed_commands = dl->telemetry_compact_trimmed_commands;
+    out->auto_compact_trigger_periodic = dl->telemetry_auto_compact_trigger_periodic;
+    out->auto_compact_trigger_command_guard = dl->telemetry_auto_compact_trigger_command_guard;
+    out->auto_compact_trigger_payload_guard = dl->telemetry_auto_compact_trigger_payload_guard;
+    out->glyph_atlas_hits = dl->telemetry_glyph_atlas_hits;
+    out->glyph_atlas_misses = dl->telemetry_glyph_atlas_misses;
+    out->glyph_atlas_builds = dl->telemetry_glyph_atlas_builds;
+    out->glyph_atlas_evictions = dl->telemetry_glyph_atlas_evictions;
+}
+
+void common_hal_rm690b0_rm690b0_reset_display_list_stats(rm690b0_rm690b0_obj_t *self) {
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL) {
+        return;
+    }
+
+    rm690b0_dl_state_t *dl = &impl->dl;
+    dl->telemetry_max_command_count = dl->count;
+    dl->telemetry_max_payload_bytes = dl->payload_bytes;
+    dl->telemetry_rejected_command_limit = 0;
+    dl->telemetry_rejected_payload_limit = 0;
+    dl->telemetry_allocation_failures = 0;
+    dl->telemetry_present_count = 0;
+    dl->telemetry_present_full = 0;
+    dl->telemetry_present_partial = 0;
+    dl->telemetry_compact_count = 0;
+    dl->telemetry_compact_trimmed_commands = 0;
+    dl->telemetry_auto_compact_trigger_periodic = 0;
+    dl->telemetry_auto_compact_trigger_command_guard = 0;
+    dl->telemetry_auto_compact_trigger_payload_guard = 0;
+    dl->telemetry_glyph_atlas_hits = 0;
+    dl->telemetry_glyph_atlas_misses = 0;
+    dl->telemetry_glyph_atlas_builds = 0;
+    dl->telemetry_glyph_atlas_evictions = 0;
+}
+
 void common_hal_rm690b0_rm690b0_set_brightness(rm690b0_rm690b0_obj_t *self, mp_float_t value) {
     CHECK_INITIALIZED();
     if (value < 0.0f || value > 1.0f) {
@@ -1299,6 +1620,69 @@ mp_float_t common_hal_rm690b0_rm690b0_get_brightness(const rm690b0_rm690b0_obj_t
     return (mp_float_t)raw / 255.0f;
 }
 
+static void rm690b0_dl_maybe_auto_compact(rm690b0_rm690b0_obj_t *self, rm690b0_impl_t *impl, bool keep_commands) {
+#if RM690B0_DL_AUTO_COMPACT_ENABLE
+    if (self == NULL || impl == NULL || self->render_mode != RM690B0_RENDER_DISPLAY_LIST) {
+        return;
+    }
+
+    rm690b0_dl_state_t *dl = &impl->dl;
+    if (!keep_commands) {
+        dl->auto_compact_frames_since_attempt = 0;
+        return;
+    }
+
+    if (dl->count < RM690B0_DL_AUTO_COMPACT_MIN_COMMANDS) {
+        dl->auto_compact_frames_since_attempt = 0;
+        return;
+    }
+
+    if (dl->auto_compact_frames_since_attempt < UINT16_MAX) {
+        dl->auto_compact_frames_since_attempt++;
+    }
+
+    size_t command_guard = RM690B0_DL_AUTO_COMPACT_GUARD_COMMANDS;
+    if (command_guard > RM690B0_DL_MAX_COMMANDS) {
+        command_guard = RM690B0_DL_MAX_COMMANDS;
+    }
+    size_t payload_guard = RM690B0_DL_AUTO_COMPACT_GUARD_PAYLOAD_BYTES;
+    if (payload_guard > RM690B0_DL_MAX_PAYLOAD_BYTES) {
+        payload_guard = RM690B0_DL_MAX_PAYLOAD_BYTES;
+    }
+
+    bool periodic_trigger = RM690B0_DL_AUTO_COMPACT_EVERY_N_FRAMES > 0 &&
+        dl->auto_compact_frames_since_attempt >= RM690B0_DL_AUTO_COMPACT_EVERY_N_FRAMES;
+    bool near_limit_trigger = command_guard > 0 &&
+        dl->count >= command_guard &&
+        dl->auto_compact_frames_since_attempt >= RM690B0_DL_AUTO_COMPACT_GUARD_COOLDOWN_FRAMES;
+    bool near_payload_trigger = payload_guard > 0 &&
+        dl->payload_bytes >= payload_guard &&
+        dl->auto_compact_frames_since_attempt >= RM690B0_DL_AUTO_COMPACT_GUARD_COOLDOWN_FRAMES;
+    if (!periodic_trigger && !near_limit_trigger && !near_payload_trigger) {
+        return;
+    }
+
+    if (periodic_trigger) {
+        dl->telemetry_auto_compact_trigger_periodic++;
+    }
+    if (near_limit_trigger) {
+        dl->telemetry_auto_compact_trigger_command_guard++;
+    }
+    if (near_payload_trigger) {
+        dl->telemetry_auto_compact_trigger_payload_guard++;
+    }
+
+    // Compact is best-effort and should never abort rendering.
+    // In the no-trim case rm690b0_dl_compact() is O(1)-ish bookkeeping only.
+    (void)rm690b0_dl_compact(self);
+    dl->auto_compact_frames_since_attempt = 0;
+#else
+    (void)self;
+    (void)impl;
+    (void)keep_commands;
+#endif
+}
+
 // ============================================================================
 // swap_buffers
 // ============================================================================
@@ -1308,12 +1692,29 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        if (impl->dl.count > 0 || impl->dl.dirty_valid || impl->dl.force_full_present) {
+            if (impl->dirty_count > 0) {
+                mp_raise_msg(&mp_type_RuntimeError,
+                    MP_ERROR_TEXT("Mixed framebuffer and display-list drawing is not supported yet"));
+            }
+            esp_err_t dl_ret = rm690b0_dl_present(self, copy);
+            if (dl_ret != ESP_OK) {
+                mp_raise_msg_varg(&mp_type_RuntimeError,
+                    MP_ERROR_TEXT("Failed to refresh display list: %s (0x%x)"),
+                    esp_err_to_name(dl_ret), dl_ret);
+            }
+            rm690b0_dl_maybe_auto_compact(self, impl, copy);
+            return;
+        }
+    }
+
     if (!impl->double_buffered && impl->framebuffer_front == NULL
         && !impl->front_buffer_alloc_failed
         && self->buffer_mode != RM690B0_BUFFER_SINGLE) {
         size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
-        impl->framebuffer_front = heap_caps_malloc(framebuffer_pixels * sizeof(uint16_t),
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        size_t framebuffer_bytes = framebuffer_pixels * sizeof(uint16_t);
+        impl->framebuffer_front = rm690b0_alloc_framebuffer_bytes(framebuffer_bytes);
 
         if (impl->framebuffer_front == NULL) {
             if (!impl->front_buffer_alloc_failed) {
@@ -1324,10 +1725,10 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
             impl->double_buffered = true;
             impl->front_buffer_alloc_failed = false;
             ESP_LOGI(TAG, "Allocated front framebuffer (%zu KB) - double-buffering enabled",
-                (framebuffer_pixels * sizeof(uint16_t)) / 1024);
+                framebuffer_bytes / 1024);
 
             memcpy(impl->framebuffer_front, impl->framebuffer,
-                framebuffer_pixels * sizeof(uint16_t));
+                framebuffer_bytes);
         }
     }
 
@@ -1375,6 +1776,9 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     mp_int_t flush_y = 0;
     mp_int_t flush_w = RM690B0_PANEL_WIDTH;
     mp_int_t flush_h = RM690B0_PANEL_HEIGHT;
+    bool copy_full_frame = true;
+    rm690b0_dirty_rect_t copy_rects[RM690B0_MAX_DIRTY_RECTS];
+    size_t copy_rect_count = 0;
 
     if (impl->dirty_count > 0) {
         size_t individual_area = 0;
@@ -1384,8 +1788,12 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         size_t merged_area = (size_t)impl->dirty_merged_w * (size_t)impl->dirty_merged_h;
 
         if (merged_area > individual_area * 3 / 2) {
+            copy_full_frame = false;
             for (size_t i = 0; i < impl->dirty_count; i++) {
                 rm690b0_dirty_rect_t *r = &impl->dirty_rects[i];
+                if (copy_rect_count < RM690B0_MAX_DIRTY_RECTS) {
+                    copy_rects[copy_rect_count++] = *r;
+                }
                 esp_err_t ret = rm690b0_flush_region(self, r->x, r->y, r->w, r->h);
                 if (ret != ESP_OK) {
                     mp_raise_msg_varg(&mp_type_RuntimeError,
@@ -1394,10 +1802,13 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
                 }
             }
         } else {
+            copy_full_frame = false;
             flush_x = impl->dirty_merged_x;
             flush_y = impl->dirty_merged_y;
             flush_w = impl->dirty_merged_w;
             flush_h = impl->dirty_merged_h;
+            copy_rects[0] = (rm690b0_dirty_rect_t){flush_x, flush_y, flush_w, flush_h};
+            copy_rect_count = 1;
             esp_err_t ret = rm690b0_flush_region(self, flush_x, flush_y, flush_w, flush_h);
             if (ret != ESP_OK) {
                 mp_raise_msg_varg(&mp_type_RuntimeError,
@@ -1428,8 +1839,28 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         // Must wait for DMA to finish before copying — the front buffer
         // is still being read by DMA.
         rm690b0_wait_for_all_dma(impl);
-        size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
-        memcpy(impl->framebuffer, impl->framebuffer_front,
-            framebuffer_pixels * sizeof(uint16_t));
+        if (copy_full_frame) {
+            size_t framebuffer_pixels = (size_t)RM690B0_PANEL_WIDTH * RM690B0_PANEL_HEIGHT;
+            size_t framebuffer_bytes = framebuffer_pixels * sizeof(uint16_t);
+            if (!rm690b0_try_copy_framebuffer_dma(
+                    impl,
+                    impl->framebuffer,
+                    impl->framebuffer_front,
+                    framebuffer_bytes)) {
+                memcpy(impl->framebuffer, impl->framebuffer_front, framebuffer_bytes);
+            }
+        } else {
+            for (size_t i = 0; i < copy_rect_count; i++) {
+                rm690b0_dirty_rect_t *r = &copy_rects[i];
+                rm690b0_copy_framebuffer_region(
+                    impl,
+                    impl->framebuffer,
+                    impl->framebuffer_front,
+                    r->x,
+                    r->y,
+                    r->w,
+                    r->h);
+            }
+        }
     }
 }

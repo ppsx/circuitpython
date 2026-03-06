@@ -14,6 +14,15 @@
 void common_hal_rm690b0_rm690b0_fill_color(rm690b0_rm690b0_obj_t *self, uint16_t color) {
     CHECK_INITIALIZED();
 
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        uint16_t swapped_color = RGB565_SWAP_GB(color);
+        esp_err_t ret = rm690b0_dl_enqueue_fill_color(self, swapped_color);
+        if (ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(ret, "fill_color");
+        }
+        return;
+    }
+
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     if (impl != NULL && !impl->double_buffered) {
         rm690b0_fill_color_direct(self, color);
@@ -36,6 +45,15 @@ void common_hal_rm690b0_rm690b0_pixel(rm690b0_rm690b0_obj_t *self, mp_int_t x, m
     mp_int_t bh = 1;
 
     if (!rm690b0_prepare_draw(self, &bx, &by, &bw, &bh)) {
+        return;
+    }
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        uint16_t swapped_color = RGB565_SWAP_GB(color);
+        esp_err_t ret = rm690b0_dl_enqueue_pixel(self, bx, by, swapped_color);
+        if (ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(ret, "pixel");
+        }
         return;
     }
 
@@ -71,12 +89,25 @@ void common_hal_rm690b0_rm690b0_fill_rect(rm690b0_rm690b0_obj_t *self, mp_int_t 
     }
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
+    if (impl == NULL) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
         return;
     }
 
     uint16_t swapped_color = RGB565_SWAP_GB(color);
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        esp_err_t ret = rm690b0_dl_enqueue_fill_rect(self, bx, by, bw, bh, swapped_color);
+        if (ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(ret, "fill_rect");
+        }
+        return;
+    }
+
+    if (impl->framebuffer == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid framebuffer handle"));
+        return;
+    }
 
     if (!impl->double_buffered && bx == 0 && bw == RM690B0_PANEL_WIDTH) {
         esp_err_t direct_ret = rm690b0_fill_rect_direct_fullwidth(self, by, bh, swapped_color);
@@ -148,57 +179,67 @@ static inline mp_int_t rm690b0_double_to_mp_int_clamped(double value) {
     return (mp_int_t)value;
 }
 
-static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, mp_int_t color) {
-    int outcode0 = compute_outcode(x0, y0, self->width, self->height);
-    int outcode1 = compute_outcode(x1, y1, self->width, self->height);
-    bool accept = false;
+static bool rm690b0_clip_line_to_logical_bounds(const rm690b0_rm690b0_obj_t *self,
+    mp_int_t *x0, mp_int_t *y0, mp_int_t *x1, mp_int_t *y1) {
+    int outcode0 = compute_outcode(*x0, *y0, self->width, self->height);
+    int outcode1 = compute_outcode(*x1, *y1, self->width, self->height);
 
     while (true) {
         if (!(outcode0 | outcode1)) {
-            accept = true;
-            break;
-        } else if (outcode0 & outcode1) {
-            break;
+            return true;
+        }
+        if (outcode0 & outcode1) {
+            return false;
+        }
+
+        int outcodeOut = outcode0 ? outcode0 : outcode1;
+        mp_int_t x = 0, y = 0;
+        if (outcodeOut & CS_BOTTOM) {
+            if (*y1 == *y0) {
+                return false;
+            }
+            double t = ((double)(self->height - 1) - (double)*y0) / ((double)*y1 - (double)*y0);
+            x = rm690b0_double_to_mp_int_clamped((double)*x0 + ((double)*x1 - (double)*x0) * t);
+            y = self->height - 1;
+        } else if (outcodeOut & CS_TOP) {
+            if (*y1 == *y0) {
+                return false;
+            }
+            double t = ((double)0 - (double)*y0) / ((double)*y1 - (double)*y0);
+            x = rm690b0_double_to_mp_int_clamped((double)*x0 + ((double)*x1 - (double)*x0) * t);
+            y = 0;
+        } else if (outcodeOut & CS_RIGHT) {
+            if (*x1 == *x0) {
+                return false;
+            }
+            double t = ((double)(self->width - 1) - (double)*x0) / ((double)*x1 - (double)*x0);
+            y = rm690b0_double_to_mp_int_clamped((double)*y0 + ((double)*y1 - (double)*y0) * t);
+            x = self->width - 1;
+        } else if (outcodeOut & CS_LEFT) {
+            if (*x1 == *x0) {
+                return false;
+            }
+            double t = ((double)0 - (double)*x0) / ((double)*x1 - (double)*x0);
+            y = rm690b0_double_to_mp_int_clamped((double)*y0 + ((double)*y1 - (double)*y0) * t);
+            x = 0;
+        }
+
+        if (outcodeOut == outcode0) {
+            *x0 = x;
+            *y0 = y;
+            outcode0 = compute_outcode(*x0, *y0, self->width, self->height);
         } else {
-            int outcodeOut = outcode0 ? outcode0 : outcode1;
-            mp_int_t x = 0, y = 0;
-            if (outcodeOut & CS_BOTTOM) {
-                if (y1 == y0) {
-                    break;
-                }
-                double t = ((double)(self->height - 1) - (double)y0) / ((double)y1 - (double)y0);
-                x = rm690b0_double_to_mp_int_clamped((double)x0 + ((double)x1 - (double)x0) * t);
-                y = self->height - 1;
-            } else if (outcodeOut & CS_TOP) {
-                if (y1 == y0) {
-                    break;
-                }
-                double t = ((double)0 - (double)y0) / ((double)y1 - (double)y0);
-                x = rm690b0_double_to_mp_int_clamped((double)x0 + ((double)x1 - (double)x0) * t);
-                y = 0;
-            } else if (outcodeOut & CS_RIGHT) {
-                if (x1 == x0) {
-                    break;
-                }
-                double t = ((double)(self->width - 1) - (double)x0) / ((double)x1 - (double)x0);
-                y = rm690b0_double_to_mp_int_clamped((double)y0 + ((double)y1 - (double)y0) * t);
-                x = self->width - 1;
-            } else if (outcodeOut & CS_LEFT) {
-                if (x1 == x0) {
-                    break;
-                }
-                double t = ((double)0 - (double)x0) / ((double)x1 - (double)x0);
-                y = rm690b0_double_to_mp_int_clamped((double)y0 + ((double)y1 - (double)y0) * t);
-                x = 0;
-            }
-            if (outcodeOut == outcode0) {
-                x0 = x; y0 = y; outcode0 = compute_outcode(x0, y0, self->width, self->height);
-            } else {
-                x1 = x; y1 = y; outcode1 = compute_outcode(x1, y1, self->width, self->height);
-            }
+            *x1 = x;
+            *y1 = y;
+            outcode1 = compute_outcode(*x1, *y1, self->width, self->height);
         }
     }
-    if (!accept) return;
+}
+
+static void rm690b0_draw_line_segment(rm690b0_rm690b0_obj_t *self, mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, mp_int_t color) {
+    if (!rm690b0_clip_line_to_logical_bounds(self, &x0, &y0, &x1, &y1)) {
+        return;
+    }
 
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     if (impl == NULL || impl->framebuffer == NULL) {
@@ -305,6 +346,21 @@ void common_hal_rm690b0_rm690b0_line(rm690b0_rm690b0_obj_t *self, mp_int_t x0, m
         return;
     }
 
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        if (!rm690b0_clip_line_to_logical_bounds(self, &x0, &y0, &x1, &y1)) {
+            return;
+        }
+        mp_int_t px0 = 0, py0 = 0, px1 = 0, py1 = 0;
+        rm690b0_map_point(self, x0, y0, &px0, &py0);
+        rm690b0_map_point(self, x1, y1, &px1, &py1);
+        uint16_t swapped_color = RGB565_SWAP_GB(color);
+        esp_err_t ret = rm690b0_dl_enqueue_line(self, px0, py0, px1, py1, swapped_color);
+        if (ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(ret, "line");
+        }
+        return;
+    }
+
     rm690b0_draw_line_segment(self, x0, y0, x1, y1, color);
 }
 
@@ -333,6 +389,17 @@ void common_hal_rm690b0_rm690b0_circle(rm690b0_rm690b0_obj_t *self, mp_int_t x, 
     mp_int_t y_min = rm690b0_add_mp_int_saturating(y, -radius);
     mp_int_t y_max = rm690b0_add_mp_int_saturating(y, radius);
     if (x_max < 0 || x_min >= self->width || y_max < 0 || y_min >= self->height) {
+        return;
+    }
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        mp_int_t phys_x = 0, phys_y = 0;
+        rm690b0_map_point(self, x, y, &phys_x, &phys_y);
+        uint16_t swapped_color = RGB565_SWAP_GB(color);
+        esp_err_t ret = rm690b0_dl_enqueue_circle(self, phys_x, phys_y, radius, swapped_color);
+        if (ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(ret, "circle");
+        }
         return;
     }
 
@@ -399,12 +466,6 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
         radius = max_radius;
     }
 
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
     mp_int_t top = rm690b0_add_mp_int_saturating(y, -radius);
     mp_int_t row_count = rm690b0_add_mp_int_saturating(radius * 2, 1);
     if (row_count <= 0) {
@@ -419,6 +480,23 @@ void common_hal_rm690b0_rm690b0_fill_circle(rm690b0_rm690b0_obj_t *self, mp_int_
     mp_int_t by2 = rm690b0_add_mp_int_saturating(by, bh);
 
     if (bx >= self->width || by >= self->height || bx2 <= 0 || by2 <= 0) {
+        return;
+    }
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        mp_int_t phys_x = 0, phys_y = 0;
+        rm690b0_map_point(self, x, y, &phys_x, &phys_y);
+        uint16_t swapped_color = RGB565_SWAP_GB(color);
+        esp_err_t ret = rm690b0_dl_enqueue_fill_circle(self, phys_x, phys_y, radius, swapped_color);
+        if (ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(ret, "fill_circle");
+        }
+        return;
+    }
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL || impl->framebuffer == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
         return;
     }
 
@@ -634,6 +712,25 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
         crop_top = 0;
     }
 
+    const uint16_t *src_base = (const uint16_t *)bufinfo.buf;
+    size_t src_stride = src_width;
+    const uint16_t *src_pixels = src_base + (size_t)(src_y1 + crop_top) * src_stride + (size_t)(src_x1 + crop_left);
+
+    bool has_transparency = (transparent_color >= 0 && transparent_color <= 0xFFFF);
+    uint16_t transp = (uint16_t)transparent_color;
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        esp_err_t dl_ret = rm690b0_dl_enqueue_blit_pixels(
+            self,
+            logical_x, logical_y, logical_w, logical_h,
+            src_pixels, src_stride, dest_is_swapped,
+            has_transparency, transp);
+        if (dl_ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(dl_ret, "blit_buffer");
+        }
+        return;
+    }
+
     mp_int_t phys_x = logical_x;
     mp_int_t phys_y = logical_y;
     mp_int_t phys_w = logical_w;
@@ -653,15 +750,8 @@ void common_hal_rm690b0_rm690b0_blit_buffer(rm690b0_rm690b0_obj_t *self, mp_int_
         return;
     }
 
-    const uint16_t *src_base = (const uint16_t *)bufinfo.buf;
-    size_t src_stride = src_width;
-    const uint16_t *src_pixels = src_base + (size_t)(src_y1 + crop_top) * src_stride + (size_t)(src_x1 + crop_left);
-
     uint16_t *framebuffer = impl->framebuffer;
     size_t fb_stride = RM690B0_PANEL_WIDTH;
-
-    bool has_transparency = (transparent_color >= 0 && transparent_color <= 0xFFFF);
-    uint16_t transp = (uint16_t)transparent_color;
 
     switch (self->rotation) {
         case 0:

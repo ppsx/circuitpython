@@ -22,7 +22,7 @@
 //|     blitting bitmaps) and a small built-in text API with several fixed fonts.
 //|     """
 //|
-//|     def __init__(self, *, buffer_mode: int = BUFFER_DOUBLE) -> None:
+//|     def __init__(self, *, buffer_mode: int = BUFFER_DOUBLE, render_mode: int = RENDER_FRAMEBUFFER) -> None:
 //|         """Initialize the RM690B0 display driver
 //|
 //|         Initializes the panel and internal framebuffers. Call `init_display()`
@@ -33,14 +33,18 @@
 //|             allocated lazily on first ``swap_buffers()`` when memory is available.
 //|             ``rm690b0.BUFFER_SINGLE`` uses only one framebuffer and flushes dirty
 //|             regions directly, saving 540 KB of SPIRAM.
+//|         :param int render_mode: ``rm690b0.RENDER_FRAMEBUFFER`` (default) uses the
+//|             classic framebuffer backend. ``rm690b0.RENDER_DISPLAY_LIST`` enables the
+//|             display-list backend (currently incremental/experimental).
 //|         """
 //|         ...
 //|
 
 static mp_obj_t rm690b0_rm690b0_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
-    enum { ARG_buffer_mode };
+    enum { ARG_buffer_mode, ARG_render_mode };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_buffer_mode, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = RM690B0_BUFFER_DOUBLE} },
+        { MP_QSTR_render_mode, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = RM690B0_RENDER_FRAMEBUFFER} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args,
@@ -55,6 +59,12 @@ static mp_obj_t rm690b0_rm690b0_make_new(const mp_obj_type_t *type, size_t n_arg
         mode = RM690B0_BUFFER_DOUBLE;
     }
     self->buffer_mode = mode;
+
+    mp_int_t render_mode = args[ARG_render_mode].u_int;
+    if (render_mode < RM690B0_RENDER_FRAMEBUFFER || render_mode > RM690B0_RENDER_DISPLAY_LIST) {
+        render_mode = RM690B0_RENDER_FRAMEBUFFER;
+    }
+    self->render_mode = render_mode;
 
     return MP_OBJ_FROM_PTR(self);
 }
@@ -435,6 +445,89 @@ static mp_obj_t rm690b0_rm690b0_swap_buffers(size_t n_args, const mp_obj_t *pos_
 }
 MP_DEFINE_CONST_FUN_OBJ_KW(rm690b0_rm690b0_swap_buffers_obj, 1, rm690b0_rm690b0_swap_buffers);
 
+//|     def compact_display_list(self) -> None:
+//|         """Compact retained DISPLAY_LIST commands.
+//|
+//|         This removes commands that are fully hidden by a later full-screen opaque draw
+//|         (for example ``fill_color`` or non-transparent full-screen ``blit_*``).
+//|         Useful for long-running ``swap_buffers(copy=True)`` workflows.
+//|         """
+//|         ...
+//|
+static mp_obj_t rm690b0_rm690b0_compact_display_list(mp_obj_t self_in) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    common_hal_rm690b0_rm690b0_compact_display_list(self);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_rm690b0_compact_display_list_obj, rm690b0_rm690b0_compact_display_list);
+
+//|     def display_list_stats(self, *, reset: bool = False) -> dict:
+//|         """Return DISPLAY_LIST telemetry counters.
+//|
+//|         The returned dict includes current and peak command/payload usage, enqueue
+//|         rejections due to limits, allocation failures, present counters, compaction
+//|         counters (including auto-compact trigger reasons), and glyph-atlas cache counters.
+//|         If ``reset=True``, counters are reset after reading.
+//|         """
+//|         ...
+//|
+static mp_obj_t rm690b0_rm690b0_display_list_stats(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum { ARG_reset };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_reset, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = false} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
+    mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args,
+        MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    rm690b0_display_list_stats_t stats;
+    common_hal_rm690b0_rm690b0_get_display_list_stats(self, &stats);
+
+    mp_obj_t dict = mp_obj_new_dict(20);
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_command_count), mp_obj_new_int_from_uint(stats.command_count));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_payload_bytes), mp_obj_new_int_from_uint(stats.payload_bytes));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_max_command_count), mp_obj_new_int_from_uint(stats.max_command_count));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_max_payload_bytes), mp_obj_new_int_from_uint(stats.max_payload_bytes));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_rejected_command_limit), mp_obj_new_int_from_uint(stats.rejected_command_limit));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_rejected_payload_limit), mp_obj_new_int_from_uint(stats.rejected_payload_limit));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_allocation_failures), mp_obj_new_int_from_uint(stats.allocation_failures));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_present_count), mp_obj_new_int_from_uint(stats.present_count));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_present_full), mp_obj_new_int_from_uint(stats.present_full));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_present_partial), mp_obj_new_int_from_uint(stats.present_partial));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_compact_count), mp_obj_new_int_from_uint(stats.compact_count));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_compact_trimmed_commands), mp_obj_new_int_from_uint(stats.compact_trimmed_commands));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_auto_compact_trigger_periodic), mp_obj_new_int_from_uint(stats.auto_compact_trigger_periodic));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_auto_compact_trigger_command_guard), mp_obj_new_int_from_uint(stats.auto_compact_trigger_command_guard));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_auto_compact_trigger_payload_guard), mp_obj_new_int_from_uint(stats.auto_compact_trigger_payload_guard));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_glyph_atlas_hits), mp_obj_new_int_from_uint(stats.glyph_atlas_hits));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_glyph_atlas_misses), mp_obj_new_int_from_uint(stats.glyph_atlas_misses));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_glyph_atlas_builds), mp_obj_new_int_from_uint(stats.glyph_atlas_builds));
+    mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_glyph_atlas_evictions), mp_obj_new_int_from_uint(stats.glyph_atlas_evictions));
+
+    if (args[ARG_reset].u_bool) {
+        common_hal_rm690b0_rm690b0_reset_display_list_stats(self);
+    }
+
+    return dict;
+}
+MP_DEFINE_CONST_FUN_OBJ_KW(rm690b0_rm690b0_display_list_stats_obj, 1, rm690b0_rm690b0_display_list_stats);
+
+//|     def set_render_mode(self, mode: int) -> None:
+//|         """Switch rendering backend at runtime.
+//|
+//|         :param int mode: ``rm690b0.RENDER_FRAMEBUFFER`` or ``rm690b0.RENDER_DISPLAY_LIST``
+//|         """
+//|         ...
+//|
+static mp_obj_t rm690b0_rm690b0_set_render_mode_method(mp_obj_t self_in, mp_obj_t mode_obj) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t mode = mp_obj_get_int(mode_obj);
+    common_hal_rm690b0_rm690b0_set_render_mode(self, mode);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(rm690b0_rm690b0_set_render_mode_method_obj, rm690b0_rm690b0_set_render_mode_method);
+
 //|     rotation: int
 //|     """The rotation of the display as an int in degrees."""
 static mp_obj_t rm690b0_rm690b0_get_rotation_prop(mp_obj_t self_in) {
@@ -477,6 +570,26 @@ MP_DEFINE_CONST_FUN_OBJ_2(rm690b0_rm690b0_set_brightness_prop_obj, rm690b0_rm690
 MP_PROPERTY_GETSET(rm690b0_rm690b0_brightness_obj,
     (mp_obj_t)&rm690b0_rm690b0_get_brightness_prop_obj,
     (mp_obj_t)&rm690b0_rm690b0_set_brightness_prop_obj);
+
+//|     render_mode: int
+//|     """Current rendering backend: ``RENDER_FRAMEBUFFER`` or ``RENDER_DISPLAY_LIST``."""
+static mp_obj_t rm690b0_rm690b0_get_render_mode_prop(mp_obj_t self_in) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    return mp_obj_new_int(common_hal_rm690b0_rm690b0_get_render_mode(self));
+}
+MP_DEFINE_CONST_FUN_OBJ_1(rm690b0_rm690b0_get_render_mode_prop_obj, rm690b0_rm690b0_get_render_mode_prop);
+
+static mp_obj_t rm690b0_rm690b0_set_render_mode_prop(mp_obj_t self_in, mp_obj_t mode_obj) {
+    rm690b0_rm690b0_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t mode = mp_obj_get_int(mode_obj);
+    common_hal_rm690b0_rm690b0_set_render_mode(self, mode);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(rm690b0_rm690b0_set_render_mode_prop_obj, rm690b0_rm690b0_set_render_mode_prop);
+
+MP_PROPERTY_GETSET(rm690b0_rm690b0_render_mode_obj,
+    (mp_obj_t)&rm690b0_rm690b0_get_render_mode_prop_obj,
+    (mp_obj_t)&rm690b0_rm690b0_set_render_mode_prop_obj);
 
 //|     width: int
 //|     """Gets the width of the display"""
@@ -564,12 +677,17 @@ static const mp_rom_map_elem_t rm690b0_rm690b0_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_font_width), MP_ROM_PTR(&rm690b0_rm690b0_font_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_font_height), MP_ROM_PTR(&rm690b0_rm690b0_font_height_obj) },
 
+    { MP_ROM_QSTR(MP_QSTR_set_render_mode), MP_ROM_PTR(&rm690b0_rm690b0_set_render_mode_method_obj) },
+    { MP_ROM_QSTR(MP_QSTR_render_mode), MP_ROM_PTR(&rm690b0_rm690b0_render_mode_obj) },
+
     { MP_ROM_QSTR(MP_QSTR_rotation), MP_ROM_PTR(&rm690b0_rm690b0_rotation_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_buffer), MP_ROM_PTR(&rm690b0_rm690b0_blit_buffer_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_bmp), MP_ROM_PTR(&rm690b0_rm690b0_blit_bmp_obj) },
     { MP_ROM_QSTR(MP_QSTR_blit_jpeg), MP_ROM_PTR(&rm690b0_rm690b0_blit_jpeg_obj) },
     { MP_ROM_QSTR(MP_QSTR_convert_bmp), MP_ROM_PTR(&rm690b0_rm690b0_convert_bmp_obj) },
     { MP_ROM_QSTR(MP_QSTR_swap_buffers), MP_ROM_PTR(&rm690b0_rm690b0_swap_buffers_obj) },
+    { MP_ROM_QSTR(MP_QSTR_compact_display_list), MP_ROM_PTR(&rm690b0_rm690b0_compact_display_list_obj) },
+    { MP_ROM_QSTR(MP_QSTR_display_list_stats), MP_ROM_PTR(&rm690b0_rm690b0_display_list_stats_obj) },
 
     { MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&rm690b0_rm690b0_width_obj) },
     { MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&rm690b0_rm690b0_height_obj) },

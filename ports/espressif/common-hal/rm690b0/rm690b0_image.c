@@ -246,6 +246,64 @@ void common_hal_rm690b0_rm690b0_blit_bmp(rm690b0_rm690b0_obj_t *self, mp_int_t x
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     const uint8_t *src_data = (const uint8_t *)bufinfo.buf + data_offset;
 
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        size_t temp_bytes = 0;
+        if (!check_bitmap_size((size_t)clip_w, (size_t)clip_h, &temp_bytes)) {
+            mp_raise_ValueError(MP_ERROR_TEXT("BMP clip region too large"));
+            return;
+        }
+
+        uint16_t *temp_pixels = (uint16_t *)heap_caps_malloc(temp_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (temp_pixels == NULL) {
+            temp_pixels = (uint16_t *)heap_caps_malloc(temp_bytes, MALLOC_CAP_8BIT);
+        }
+        if (temp_pixels == NULL) {
+            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate BMP staging buffer"));
+            return;
+        }
+
+        for (mp_int_t row = 0; row < clip_h; row++) {
+            mp_int_t src_y = y_offset + row;
+            mp_int_t src_row_idx = top_down ? src_y : (height - 1 - src_y);
+            const uint8_t *row_ptr = src_data + (size_t)src_row_idx * src_stride + (size_t)x_offset * bytes_per_pixel;
+            uint16_t *dst_row = temp_pixels + (size_t)row * (size_t)clip_w;
+
+            if (pixel_format == RM690B0_BMP_PIXEL_BGR888) {
+                for (mp_int_t col = 0; col < clip_w; col++) {
+                    size_t col3 = (size_t)col * 3;
+                    uint8_t b = row_ptr[col3];
+                    uint8_t g = row_ptr[col3 + 1];
+                    uint8_t r = row_ptr[col3 + 2];
+                    uint16_t rgb = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+                    dst_row[col] = RGB565_SWAP_GB(rgb);
+                }
+            } else if (pixel_format == RM690B0_BMP_PIXEL_RGB565) {
+                for (mp_int_t col = 0; col < clip_w; col++) {
+                    size_t col2 = (size_t)col * 2;
+                    uint16_t val = rm690b0_read_u16_le(row_ptr + col2);
+                    dst_row[col] = RGB565_SWAP_GB(val);
+                }
+            } else {
+                for (mp_int_t col = 0; col < clip_w; col++) {
+                    size_t col2 = (size_t)col * 2;
+                    uint16_t val_1555 = rm690b0_read_u16_le(row_ptr + col2);
+                    dst_row[col] = RGB565_SWAP_GB(rm690b0_bmp_1555_to_rgb565(val_1555));
+                }
+            }
+        }
+
+        esp_err_t dl_ret = rm690b0_dl_enqueue_blit_pixels(
+            self,
+            clip_x, clip_y, clip_w, clip_h,
+            temp_pixels, (size_t)clip_w, true,
+            false, 0);
+        heap_caps_free(temp_pixels);
+        if (dl_ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(dl_ret, "blit_bmp");
+        }
+        return;
+    }
+
     if (self->rotation == 0) {
         size_t fb_stride = RM690B0_PANEL_WIDTH;
         uint16_t *fb = impl->framebuffer;
@@ -377,6 +435,63 @@ static esp_err_t rm690b0_jpeg_on_block(intptr_t ctx_ptr,
     return ESP_OK;
 }
 
+typedef struct {
+    mp_int_t origin_x;
+    mp_int_t origin_y;
+    mp_int_t clip_x;
+    mp_int_t clip_y;
+    mp_int_t clip_w;
+    mp_int_t clip_h;
+    uint16_t *staging_swapped;
+    size_t staging_stride;
+} rm690b0_jpeg_dl_ctx_t;
+
+static esp_err_t rm690b0_jpeg_on_block_dl(intptr_t ctx_ptr,
+    uint32_t block_top, uint32_t block_left,
+    uint32_t block_bottom, uint32_t block_right,
+    const uint16_t *pixels) {
+
+    rm690b0_jpeg_dl_ctx_t *ctx = (rm690b0_jpeg_dl_ctx_t *)ctx_ptr;
+    if (ctx == NULL || ctx->staging_swapped == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    mp_int_t dest_left = ctx->origin_x + (mp_int_t)block_left;
+    mp_int_t dest_top = ctx->origin_y + (mp_int_t)block_top;
+    mp_int_t dest_right = ctx->origin_x + (mp_int_t)block_right;
+    mp_int_t dest_bottom = ctx->origin_y + (mp_int_t)block_bottom;
+
+    mp_int_t clip_right = ctx->clip_x + ctx->clip_w - 1;
+    mp_int_t clip_bottom = ctx->clip_y + ctx->clip_h - 1;
+
+    mp_int_t draw_left = dest_left > ctx->clip_x ? dest_left : ctx->clip_x;
+    mp_int_t draw_top = dest_top > ctx->clip_y ? dest_top : ctx->clip_y;
+    mp_int_t draw_right = dest_right < clip_right ? dest_right : clip_right;
+    mp_int_t draw_bottom = dest_bottom < clip_bottom ? dest_bottom : clip_bottom;
+
+    if (draw_left > draw_right || draw_top > draw_bottom) {
+        return ESP_OK;
+    }
+
+    mp_int_t block_w = (mp_int_t)(block_right - block_left + 1);
+    if (block_w <= 0) {
+        return ESP_OK;
+    }
+
+    for (mp_int_t row = draw_top; row <= draw_bottom; row++) {
+        mp_int_t src_row = row - dest_top;
+        const uint16_t *row_src = pixels + (size_t)src_row * (size_t)block_w + (size_t)(draw_left - dest_left);
+        uint16_t *dst = ctx->staging_swapped
+            + (size_t)(row - ctx->clip_y) * ctx->staging_stride
+            + (size_t)(draw_left - ctx->clip_x);
+        for (mp_int_t col = draw_left; col <= draw_right; col++) {
+            dst[col - draw_left] = RGB565_SWAP_GB(*row_src++);
+        }
+    }
+
+    return ESP_OK;
+}
+
 
 void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp_int_t y, mp_obj_t jpeg_data) {
     CHECK_INITIALIZED();
@@ -403,12 +518,6 @@ void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t 
         return;
     }
 
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
-    if (impl == NULL || impl->framebuffer == NULL) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
-        return;
-    }
-
     int width = jpeg_out.width;
     int height = jpeg_out.height;
 
@@ -417,34 +526,91 @@ void common_hal_rm690b0_rm690b0_blit_jpeg(rm690b0_rm690b0_obj_t *self, mp_int_t 
     mp_int_t clip_w = width;
     mp_int_t clip_h = height;
 
-    if (clip_logical_rect(self, &clip_x, &clip_y, &clip_w, &clip_h)) {
-        rm690b0_jpeg_draw_ctx_t draw_ctx = {
-            .self = self,
-            .impl = impl,
+    if (!clip_logical_rect(self, &clip_x, &clip_y, &clip_w, &clip_h)) {
+        return;
+    }
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        size_t staging_bytes = 0;
+        if (!check_bitmap_size((size_t)clip_w, (size_t)clip_h, &staging_bytes)) {
+            mp_raise_ValueError(MP_ERROR_TEXT("JPEG clip region too large"));
+            return;
+        }
+
+        uint16_t *staging = (uint16_t *)heap_caps_malloc(staging_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (staging == NULL) {
+            staging = (uint16_t *)heap_caps_malloc(staging_bytes, MALLOC_CAP_8BIT);
+        }
+        if (staging == NULL) {
+            mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate JPEG staging buffer"));
+            return;
+        }
+
+        rm690b0_jpeg_dl_ctx_t draw_ctx = {
             .origin_x = x,
             .origin_y = y,
             .clip_x = clip_x,
             .clip_y = clip_y,
             .clip_w = clip_w,
             .clip_h = clip_h,
-            .rotation_zero = (self->rotation == 0),
+            .staging_swapped = staging,
+            .staging_stride = (size_t)clip_w,
         };
 
         jpeg_cfg.user_data = (intptr_t)&draw_ctx;
-        jpeg_cfg.on_block = rm690b0_jpeg_on_block;
+        jpeg_cfg.on_block = rm690b0_jpeg_on_block_dl;
 
         ret = esp_jpeg_decode(&jpeg_cfg, NULL);
         if (ret != ESP_OK) {
+            heap_caps_free(staging);
             mp_raise_ValueError(MP_ERROR_TEXT("JPEG decode failed"));
             return;
         }
 
-        mp_int_t bx = clip_x, by = clip_y, bw = clip_w, bh = clip_h;
-        if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
-            esp_err_t flush_ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
-            if (flush_ret != ESP_OK) {
-                mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw JPEG: %s"), esp_err_to_name(flush_ret));
-            }
+        esp_err_t dl_ret = rm690b0_dl_enqueue_blit_pixels(
+            self,
+            clip_x, clip_y, clip_w, clip_h,
+            staging, (size_t)clip_w, true,
+            false, 0);
+        heap_caps_free(staging);
+        if (dl_ret != ESP_OK) {
+            rm690b0_raise_dl_enqueue_error(dl_ret, "blit_jpeg");
+        }
+        return;
+    }
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
+    if (impl == NULL || impl->framebuffer == NULL) {
+        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Invalid display handle"));
+        return;
+    }
+
+    rm690b0_jpeg_draw_ctx_t draw_ctx = {
+        .self = self,
+        .impl = impl,
+        .origin_x = x,
+        .origin_y = y,
+        .clip_x = clip_x,
+        .clip_y = clip_y,
+        .clip_w = clip_w,
+        .clip_h = clip_h,
+        .rotation_zero = (self->rotation == 0),
+    };
+
+    jpeg_cfg.user_data = (intptr_t)&draw_ctx;
+    jpeg_cfg.on_block = rm690b0_jpeg_on_block;
+
+    ret = esp_jpeg_decode(&jpeg_cfg, NULL);
+    if (ret != ESP_OK) {
+        mp_raise_ValueError(MP_ERROR_TEXT("JPEG decode failed"));
+        return;
+    }
+
+    mp_int_t bx = clip_x, by = clip_y, bw = clip_w, bh = clip_h;
+    if (map_rect_for_rotation(self, &bx, &by, &bw, &bh)) {
+        esp_err_t flush_ret = rm690b0_finalize_draw(self, impl, bx, by, bw, bh);
+        if (flush_ret != ESP_OK) {
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to draw JPEG: %s"), esp_err_to_name(flush_ret));
         }
     }
 }

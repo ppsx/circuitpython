@@ -20,6 +20,10 @@
 #include "driver/spi_master.h"
 #include "esp_heap_caps.h"
 #include "esp_rom_sys.h"
+#include "soc/soc_caps.h"
+#if SOC_ASYNC_MEMCPY_SUPPORTED
+#include "esp_async_memcpy.h"
+#endif
 
 #include "esp-idf/components/esp_lcd/include/esp_lcd_panel_io.h"
 #include "esp-idf/components/esp_lcd/include/esp_lcd_panel_vendor.h"
@@ -110,6 +114,38 @@
 #define RM690B0_PENDING_BUFFER_FRAMEBUFFER   (0xFF)
 #define RM690B0_PENDING_BUFFER_ALLOC         (0xFE)
 #define RM690B0_PENDING_BUFFER_TEMP          (0xFD)
+#ifndef RM690B0_DL_MAX_COMMANDS
+#define RM690B0_DL_MAX_COMMANDS              (4096)
+#endif
+#ifndef RM690B0_DL_MAX_PAYLOAD_BYTES
+#define RM690B0_DL_MAX_PAYLOAD_BYTES         (2 * 1024 * 1024)
+#endif
+#ifndef RM690B0_DL_GLYPH_ATLAS_SLOTS
+#define RM690B0_DL_GLYPH_ATLAS_SLOTS         (40)
+#endif
+#ifndef RM690B0_DL_AUTO_COMPACT_ENABLE
+#define RM690B0_DL_AUTO_COMPACT_ENABLE       (1)
+#endif
+#ifndef RM690B0_DL_AUTO_COMPACT_EVERY_N_FRAMES
+#define RM690B0_DL_AUTO_COMPACT_EVERY_N_FRAMES (24)
+#endif
+#ifndef RM690B0_DL_AUTO_COMPACT_GUARD_COMMANDS
+#define RM690B0_DL_AUTO_COMPACT_GUARD_COMMANDS (3400)
+#endif
+#ifndef RM690B0_DL_AUTO_COMPACT_GUARD_PAYLOAD_BYTES
+#define RM690B0_DL_AUTO_COMPACT_GUARD_PAYLOAD_BYTES (512 * 1024)
+#endif
+#ifndef RM690B0_DL_AUTO_COMPACT_GUARD_COOLDOWN_FRAMES
+#define RM690B0_DL_AUTO_COMPACT_GUARD_COOLDOWN_FRAMES (4)
+#endif
+#ifndef RM690B0_DL_AUTO_COMPACT_MIN_COMMANDS
+#define RM690B0_DL_AUTO_COMPACT_MIN_COMMANDS (64)
+#endif
+#define RM690B0_DL_GLYPH_MASK_MAX_ROWS       (48)
+#define RM690B0_DL_GLYPH_MASK_MAX_COLS       (48)
+#if RM690B0_DL_GLYPH_MASK_MAX_COLS > 64
+#error "RM690B0_DL_GLYPH_MASK_MAX_COLS must be <= 64"
+#endif
 
 // Built-in font identifiers (must match shared-bindings docs)
 #define RM690B0_FONT_8x8_MONO       (0)
@@ -153,6 +189,115 @@ typedef struct {
     mp_int_t x, y, w, h;
 } rm690b0_dirty_rect_t;
 
+typedef enum {
+    RM690B0_DL_CMD_FILL_COLOR = 0,
+    RM690B0_DL_CMD_FILL_RECT,
+    RM690B0_DL_CMD_PIXEL,
+    RM690B0_DL_CMD_LINE,
+    RM690B0_DL_CMD_CIRCLE,
+    RM690B0_DL_CMD_FILL_CIRCLE,
+    RM690B0_DL_CMD_BLIT,
+    RM690B0_DL_CMD_GLYPH,
+} rm690b0_dl_cmd_type_t;
+
+typedef struct {
+    bool valid;
+    uint8_t font_id;
+    uint8_t ch;
+    uint16_t rotation;
+    uint8_t width;
+    uint8_t height;
+    uint32_t last_used;
+    uint64_t row_masks[RM690B0_DL_GLYPH_MASK_MAX_ROWS];
+} rm690b0_dl_glyph_cache_entry_t;
+
+typedef struct {
+    rm690b0_dl_cmd_type_t type;
+    uint16_t color_swapped;
+    union {
+        struct {
+            mp_int_t x;
+            mp_int_t y;
+            mp_int_t w;
+            mp_int_t h;
+        } rect;
+        struct {
+            mp_int_t x;
+            mp_int_t y;
+        } pixel;
+        struct {
+            mp_int_t x0;
+            mp_int_t y0;
+            mp_int_t x1;
+            mp_int_t y1;
+        } line;
+        struct {
+            mp_int_t x;
+            mp_int_t y;
+            mp_int_t radius;
+        } circle;
+        struct {
+            mp_int_t x;
+            mp_int_t y;
+            mp_int_t w;
+            mp_int_t h;
+            uint16_t *pixels_swapped;
+            size_t payload_bytes;
+            uint16_t transparency_swapped;
+            uint8_t has_transparency;
+        } blit;
+        struct {
+            mp_int_t x;
+            mp_int_t y;
+            uint16_t bg_swapped;
+            uint8_t font_id;
+            mp_int_t rotation;
+            uint8_t ch;
+            uint8_t has_bg;
+            uint8_t atlas_hint;
+            int16_t bbox_x;
+            int16_t bbox_y;
+            uint16_t bbox_w;
+            uint16_t bbox_h;
+        } glyph;
+    } u;
+} rm690b0_dl_cmd_t;
+
+typedef struct {
+    rm690b0_dl_cmd_t *items;
+    size_t count;
+    size_t capacity;
+    bool dirty_valid;
+    mp_int_t dirty_x;
+    mp_int_t dirty_y;
+    mp_int_t dirty_w;
+    mp_int_t dirty_h;
+    bool force_full_present;
+    bool clear_color_valid;
+    uint16_t clear_color_swapped;
+    size_t payload_bytes;
+    size_t telemetry_max_command_count;
+    size_t telemetry_max_payload_bytes;
+    size_t telemetry_rejected_command_limit;
+    size_t telemetry_rejected_payload_limit;
+    size_t telemetry_allocation_failures;
+    size_t telemetry_present_count;
+    size_t telemetry_present_full;
+    size_t telemetry_present_partial;
+    size_t telemetry_compact_count;
+    size_t telemetry_compact_trimmed_commands;
+    size_t telemetry_auto_compact_trigger_periodic;
+    size_t telemetry_auto_compact_trigger_command_guard;
+    size_t telemetry_auto_compact_trigger_payload_guard;
+    size_t telemetry_glyph_atlas_hits;
+    size_t telemetry_glyph_atlas_misses;
+    size_t telemetry_glyph_atlas_builds;
+    size_t telemetry_glyph_atlas_evictions;
+    uint16_t auto_compact_frames_since_attempt;
+    uint32_t glyph_atlas_tick;
+    rm690b0_dl_glyph_cache_entry_t glyph_atlas[RM690B0_DL_GLYPH_ATLAS_SLOTS];
+} rm690b0_dl_state_t;
+
 typedef struct rm690b0_impl {
     esp_lcd_panel_io_handle_t io_handle;
     esp_lcd_panel_handle_t panel_handle;
@@ -168,6 +313,7 @@ typedef struct rm690b0_impl {
     bool dirty_merged_valid;
     mp_int_t dirty_merged_x, dirty_merged_y, dirty_merged_w, dirty_merged_h;
     rm690b0_dirty_rect_t dirty_rects[RM690B0_MAX_DIRTY_RECTS];
+    rm690b0_dl_state_t dl;
     SemaphoreHandle_t transfer_done_sem;
     bool dma_buffer_in_use[2];
     bool dma_alloc_buffer_in_use;
@@ -176,6 +322,11 @@ typedef struct rm690b0_impl {
     size_t dma_inflight;
     rm690b0_dma_pending_list_t dma_pending;
     bool fatal_dma_error;
+#if SOC_ASYNC_MEMCPY_SUPPORTED
+    async_memcpy_handle_t fb_copy_dma_handle;
+    SemaphoreHandle_t fb_copy_done_sem;
+    bool fb_copy_dma_disabled;
+#endif
     int16_t *circle_span_cache;
     size_t circle_span_capacity;
 } rm690b0_impl_t;
@@ -283,6 +434,16 @@ static inline void rm690b0_wait_for_all_dma(rm690b0_impl_t *impl) {
     while (impl->dma_inflight > 0) {
         rm690b0_wait_for_dma_completion(impl);
     }
+}
+
+static inline void rm690b0_raise_dl_enqueue_error(esp_err_t ret, const char *op) {
+    if (ret == ESP_ERR_NO_MEM) {
+        mp_raise_msg(&mp_type_MemoryError,
+            MP_ERROR_TEXT("display-list out of memory or DL limits exceeded"));
+        return;
+    }
+    mp_raise_msg_varg(&mp_type_RuntimeError,
+        MP_ERROR_TEXT("display-list %s failed: %s"), op, esp_err_to_name(ret));
 }
 
 static inline void rm690b0_fill_span_fast(uint16_t *dest, size_t span_width, uint16_t color) {
@@ -535,6 +696,30 @@ bool rm690b0_on_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
 int16_t *rm690b0_acquire_span_cache(rm690b0_impl_t *impl, size_t needed_rows);
 void rm690b0_span_update(rm690b0_span_accumulator_t *acc, mp_int_t row_y, mp_int_t x_val);
 bool expand_even_region(mp_int_t *x, mp_int_t *y, mp_int_t *width, mp_int_t *height);
+void rm690b0_dl_init_state(rm690b0_impl_t *impl);
+void rm690b0_dl_deinit_state(rm690b0_impl_t *impl);
+void rm690b0_dl_reset_frame(rm690b0_impl_t *impl, bool keep_capacity);
+esp_err_t rm690b0_dl_set_mode(rm690b0_rm690b0_obj_t *self, mp_int_t mode);
+esp_err_t rm690b0_dl_enqueue_fill_color(rm690b0_rm690b0_obj_t *self, uint16_t color_swapped);
+esp_err_t rm690b0_dl_enqueue_fill_rect(rm690b0_rm690b0_obj_t *self,
+    mp_int_t x, mp_int_t y, mp_int_t w, mp_int_t h, uint16_t color_swapped);
+esp_err_t rm690b0_dl_enqueue_pixel(rm690b0_rm690b0_obj_t *self,
+    mp_int_t x, mp_int_t y, uint16_t color_swapped);
+esp_err_t rm690b0_dl_enqueue_line(rm690b0_rm690b0_obj_t *self,
+    mp_int_t x0, mp_int_t y0, mp_int_t x1, mp_int_t y1, uint16_t color_swapped);
+esp_err_t rm690b0_dl_enqueue_circle(rm690b0_rm690b0_obj_t *self,
+    mp_int_t x, mp_int_t y, mp_int_t radius, uint16_t color_swapped);
+esp_err_t rm690b0_dl_enqueue_fill_circle(rm690b0_rm690b0_obj_t *self,
+    mp_int_t x, mp_int_t y, mp_int_t radius, uint16_t color_swapped);
+esp_err_t rm690b0_dl_enqueue_blit_pixels(rm690b0_rm690b0_obj_t *self,
+    mp_int_t logical_x, mp_int_t logical_y, mp_int_t logical_w, mp_int_t logical_h,
+    const uint16_t *src_pixels, size_t src_stride, bool src_is_swapped,
+    bool has_transparency, uint16_t transparency_src);
+esp_err_t rm690b0_dl_enqueue_glyph(rm690b0_rm690b0_obj_t *self,
+    mp_int_t x, mp_int_t y, uint8_t font_id, uint8_t ch,
+    uint16_t fg_swapped, bool has_bg, uint16_t bg_swapped);
+esp_err_t rm690b0_dl_present(rm690b0_rm690b0_obj_t *self, bool keep_commands);
+esp_err_t rm690b0_dl_compact(rm690b0_rm690b0_obj_t *self);
 
 // ============================================================================
 // rm690b0_finalize_draw — inline, depends on mark_dirty_region + flush_region

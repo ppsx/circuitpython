@@ -289,13 +289,53 @@ void common_hal_rm690b0_rm690b0_text(rm690b0_rm690b0_obj_t *self, mp_int_t x, mp
         return;
     }
 
-    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
     mp_int_t font_id = rm690b0_get_current_font(self);
     mp_int_t cursor_x = x;
     mp_int_t cursor_y = y;
 
     mp_int_t font_width, font_height;
     rm690b0_get_font_dims(font_id, &font_width, &font_height);
+
+    if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
+        uint16_t fg_swapped = RGB565_SWAP_GB(fg);
+        uint16_t bg_swapped = has_bg ? RGB565_SWAP_GB(bg) : 0;
+
+        for (size_t i = 0; i < text_len; i++) {
+            uint8_t ch = (uint8_t)text[i];
+
+            if (ch == '\n') {
+                cursor_x = x;
+                cursor_y = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+                continue;
+            }
+            if (ch == '\r') {
+                continue;
+            }
+            if (cursor_y >= self->height) {
+                break;
+            }
+
+            esp_err_t ret = rm690b0_dl_enqueue_glyph(self,
+                cursor_x, cursor_y,
+                (uint8_t)font_id,
+                ch,
+                fg_swapped,
+                has_bg,
+                bg_swapped);
+            if (ret != ESP_OK) {
+                rm690b0_raise_dl_enqueue_error(ret, "text");
+            }
+
+            cursor_x = rm690b0_add_mp_int_saturating(cursor_x, font_width);
+            if (cursor_x >= self->width) {
+                cursor_x = x;
+                cursor_y = rm690b0_add_mp_int_saturating(cursor_y, font_height);
+            }
+        }
+        return;
+    }
+
+    rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
     mp_int_t min_x = x;
     mp_int_t max_x = x;
