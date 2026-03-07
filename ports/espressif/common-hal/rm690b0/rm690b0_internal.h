@@ -323,7 +323,6 @@ typedef struct rm690b0_impl {
     SemaphoreHandle_t transfer_done_sem;
     bool dma_buffer_in_use[2];
     bool dma_alloc_buffer_in_use;
-    bool alloc_front_failed;
     uint16_t *dma_alloc_buffer_ptr;
     size_t dma_inflight;
     rm690b0_dma_pending_list_t dma_pending;
