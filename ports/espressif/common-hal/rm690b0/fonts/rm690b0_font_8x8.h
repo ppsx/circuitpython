@@ -9,7 +9,8 @@
 // Simple 8x8 ASCII font for characters 0x20..0x7F.
 // Each character: 8 bytes, MSB = left pixel, LSB = right pixel, 1 bit per pixel.
 // Indexing: glyph = rm690b0_font_8x8_data[codepoint - 0x20] for 0x20 <= codepoint <= 0x7F.
-static const uint8_t rm690b0_font_8x8_data[96][8] = {
+#ifdef RM690B0_FONT_DEFINE_STORAGE
+const uint8_t rm690b0_font_8x8_data[96][8] = {
     // 0x20 ' '
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
     // 0x21 '!'
@@ -203,3 +204,6 @@ static const uint8_t rm690b0_font_8x8_data[96][8] = {
     // 0x7F (DEL / unused)
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
+#else
+extern const uint8_t rm690b0_font_8x8_data[96][8];
+#endif
