@@ -15,6 +15,21 @@ const char *TAG = "rm690b0";
 portMUX_TYPE rm690b0_spinlock = portMUX_INITIALIZER_UNLOCKED;
 rm690b0_rm690b0_obj_t *rm690b0_singleton = NULL;
 
+// Shadow copies of ESP-IDF handles and PSRAM allocations that survive soft reset.
+// The originals live in impl (Python heap, wiped on reset).
+static esp_lcd_panel_handle_t s_panel_handle = NULL;
+static esp_lcd_panel_io_handle_t s_io_handle = NULL;
+static bool s_bus_initialized = false;
+static void *s_allocs[6] = {NULL};  // framebuffer, front, chunk[0], chunk[1], dma_alloc, circle_span
+static bool s_boot_pin_ready = false;
+static bool s_boot_prev = false;
+#define S_FB       0
+#define S_FB_FRONT 1
+#define S_CHUNK0   2
+#define S_CHUNK1   3
+#define S_DMA_ALLOC 4
+#define S_CIRCLE   5
+
 // ============================================================================
 // ISR callback
 // ============================================================================
@@ -1393,6 +1408,11 @@ void common_hal_rm690b0_rm690b0_deinit(rm690b0_rm690b0_obj_t *self) {
         rm690b0_singleton = NULL;
     }
 
+    s_panel_handle = NULL;
+    s_io_handle = NULL;
+    s_bus_initialized = false;
+    for (int i = 0; i < 6; i++) { s_allocs[i] = NULL; }
+
     ESP_LOGI(TAG, "RM690B0 deinit complete - all resources freed");
 }
 
@@ -1412,39 +1432,38 @@ void common_hal_rm690b0_rm690b0_deinit_all(void) {
 }
 
 void rm690b0_reset(void) {
-    // Called by reset_port() on soft reset.  The Python heap (and therefore the
-    // old rm690b0_rm690b0_obj_t) has already been wiped, so we must NOT
-    // dereference rm690b0_singleton -- it is a dangling pointer.
-    //
-    // The ESP-IDF SPI driver and GPIO state survive a soft reset, so we do a
-    // best-effort hardware cleanup directly through ESP-IDF before nullifying
-    // the singleton.
+    // Called by reset_port() on soft reset / supervisor.reload().
+    // The Python heap is already wiped so rm690b0_singleton is dangling --
+    // we must NOT dereference it.  Use shadow copies to tear down
+    // ESP-IDF resources and free PSRAM allocations.
 
-    if (rm690b0_singleton == NULL) {
-        return;
-    }
-
-    ESP_LOGI(TAG, "rm690b0_reset: releasing stale hardware state");
-
-    // 1. Free the SPI bus (may fail if already free -- that's fine)
-    spi_bus_free(SPI2_HOST);
-
-    // 2. Power OFF display and hold reset active.
-    //    Do NOT power back on here -- init_display() handles the full
-    //    power-on sequence with its own 200 ms stabilization delay.
-    //    This ensures the panel caps fully discharge for a clean cold start.
-    if (LCD_PWR_PIN != GPIO_NUM_NC) {
-        gpio_set_direction(LCD_PWR_PIN, GPIO_MODE_OUTPUT);
-        gpio_set_level(LCD_PWR_PIN, !LCD_PWR_ON_LEVEL);   // power OFF
-    }
-    if (LCD_RST_PIN != GPIO_NUM_NC) {
-        gpio_set_direction(LCD_RST_PIN, GPIO_MODE_OUTPUT);
-        gpio_set_level(LCD_RST_PIN, 0);                    // hold reset
-    }
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    // 3. Nullify singleton so the next construct() starts fresh
     rm690b0_singleton = NULL;
+
+    // Tear down LCD stack in reverse creation order
+    if (s_panel_handle != NULL) {
+        esp_lcd_panel_del(s_panel_handle);
+        s_panel_handle = NULL;
+    }
+    if (s_io_handle != NULL) {
+        esp_lcd_panel_io_del(s_io_handle);
+        s_io_handle = NULL;
+    }
+    if (s_bus_initialized) {
+        spi_bus_free(SPI2_HOST);
+        s_bus_initialized = false;
+    }
+
+    // Free PSRAM allocations (framebuffers, DMA, caches)
+    for (int i = 0; i < 6; i++) {
+        if (s_allocs[i] != NULL) {
+            heap_caps_free(s_allocs[i]);
+            s_allocs[i] = NULL;
+        }
+    }
+
+    // Reset BOOT button state so it reconfigures on next swap_buffers
+    s_boot_pin_ready = false;
+    s_boot_prev = false;
 }
 
 esp_lcd_panel_handle_t rm690b0_get_panel_handle(void) {
@@ -1526,10 +1545,11 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
             RM690B0_PANEL_BUS_SPI_CONFIG(LCD_SCK_PIN, LCD_D0_PIN, max_transfer_bytes);
         ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
         if (ret != ESP_OK) {
-            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to initialize SPI bus: %s"), esp_err_to_name(ret));
+            mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to initialize SPI bus: %s (0x%x)"), esp_err_to_name(ret), ret);
             return;
         }
         impl->bus_initialized = true;
+        s_bus_initialized = true;
         ESP_LOGI(TAG, "%s bus initialized", LCD_USE_QSPI ? "QSPI" : "SPI");
     }
 
@@ -1547,6 +1567,7 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to create panel I/O"));
         return;
     }
+    s_io_handle = impl->io_handle;
     ESP_LOGI(TAG, "Panel I/O created");
 
     rm690b0_vendor_config_t vendor_config = {
@@ -1577,6 +1598,7 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Failed to create RM690B0 panel"));
         return;
     }
+    s_panel_handle = impl->panel_handle;
     ESP_LOGI(TAG, "RM690B0 panel created");
 
     ret = esp_lcd_panel_reset(impl->panel_handle);
@@ -1695,6 +1717,15 @@ void common_hal_rm690b0_rm690b0_init_display(rm690b0_rm690b0_obj_t *self) {
     impl->front_buffer_alloc_failed = false;
     impl->fatal_dma_error = false;
     self->initialized = true;
+
+    // Save PSRAM pointers so rm690b0_reset() can free them after soft reset
+    s_allocs[S_FB] = impl->framebuffer;
+    s_allocs[S_FB_FRONT] = impl->framebuffer_front;
+    s_allocs[S_CHUNK0] = impl->chunk_buffers[0];
+    s_allocs[S_CHUNK1] = impl->chunk_buffers[1];
+    s_allocs[S_DMA_ALLOC] = impl->dma_alloc_buffer_ptr;
+    s_allocs[S_CIRCLE] = impl->circle_span_cache;
+
     ESP_LOGI(TAG, "RM690B0 display initialization complete");
     return;
 
@@ -2024,14 +2055,18 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
     // Raises KeyboardInterrupt on press edge so games exit cleanly.
     #if CIRCUITPY_RM690B0
     {
-        static bool boot_prev = false;
-        bool boot_now = (gpio_get_level(GPIO_NUM_0) == 0);
-        if (boot_now && !boot_prev) {
-            boot_prev = true;
-            mp_raise_type(&mp_type_KeyboardInterrupt);
-            // unreachable -- longjmp
+        if (!s_boot_pin_ready) {
+            gpio_set_direction(GPIO_NUM_0, GPIO_MODE_INPUT);
+            gpio_set_pull_mode(GPIO_NUM_0, GPIO_PULLUP_ONLY);
+            s_boot_prev = (gpio_get_level(GPIO_NUM_0) == 0);
+            s_boot_pin_ready = true;
         }
-        boot_prev = boot_now;
+        bool boot_now = (gpio_get_level(GPIO_NUM_0) == 0);
+        if (boot_now && !s_boot_prev) {
+            s_boot_prev = true;
+            mp_raise_type(&mp_type_KeyboardInterrupt);
+        }
+        s_boot_prev = boot_now;
     }
     #endif
 
@@ -2069,6 +2104,7 @@ void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool c
         } else {
             impl->double_buffered = true;
             impl->front_buffer_alloc_failed = false;
+            s_allocs[S_FB_FRONT] = impl->framebuffer_front;
             ESP_LOGI(TAG, "Allocated front framebuffer (%zu KB) - double-buffering enabled",
                 framebuffer_bytes / 1024);
 
