@@ -35,6 +35,10 @@
 #define CIRCUITPY_RM690B0_USE_QSPI       (1)
 #define CIRCUITPY_RM690B0_PIXEL_CLOCK_HZ (80 * 1000 * 1000)
 
+// Touch controller (FT6336U) I2C pins for LVGL input driver
+#define CIRCUITPY_TOUCH_I2C_SDA (47)
+#define CIRCUITPY_TOUCH_I2C_SCL (48)
+
 // No default SPI bus — SD card uses SDIO, display uses QSPI.
 #define CIRCUITPY_BOARD_SPI         (0)
 
