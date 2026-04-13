@@ -2020,6 +2020,21 @@ static void rm690b0_dl_maybe_auto_compact(rm690b0_rm690b0_obj_t *self, rm690b0_i
 void common_hal_rm690b0_rm690b0_swap_buffers(rm690b0_rm690b0_obj_t *self, bool copy) {
     CHECK_INITIALIZED();
 
+    // Check BOOT button (GPIO0) for "return to menu" before any DMA work.
+    // Raises KeyboardInterrupt on press edge so games exit cleanly.
+    #if CIRCUITPY_RM690B0
+    {
+        static bool boot_prev = false;
+        bool boot_now = (gpio_get_level(GPIO_NUM_0) == 0);
+        if (boot_now && !boot_prev) {
+            boot_prev = true;
+            mp_raise_type(&mp_type_KeyboardInterrupt);
+            // unreachable -- longjmp
+        }
+        boot_prev = boot_now;
+    }
+    #endif
+
     rm690b0_impl_t *impl = (rm690b0_impl_t *)self->impl;
 
     if (self->render_mode == RM690B0_RENDER_DISPLAY_LIST) {
