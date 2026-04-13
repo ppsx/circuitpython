@@ -1411,6 +1411,42 @@ void common_hal_rm690b0_rm690b0_deinit_all(void) {
     }
 }
 
+void rm690b0_reset(void) {
+    // Called by reset_port() on soft reset.  The Python heap (and therefore the
+    // old rm690b0_rm690b0_obj_t) has already been wiped, so we must NOT
+    // dereference rm690b0_singleton -- it is a dangling pointer.
+    //
+    // The ESP-IDF SPI driver and GPIO state survive a soft reset, so we do a
+    // best-effort hardware cleanup directly through ESP-IDF before nullifying
+    // the singleton.
+
+    if (rm690b0_singleton == NULL) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "rm690b0_reset: releasing stale hardware state");
+
+    // 1. Free the SPI bus (may fail if already free -- that's fine)
+    spi_bus_free(SPI2_HOST);
+
+    // 2. Power OFF display and hold reset active.
+    //    Do NOT power back on here -- init_display() handles the full
+    //    power-on sequence with its own 200 ms stabilization delay.
+    //    This ensures the panel caps fully discharge for a clean cold start.
+    if (LCD_PWR_PIN != GPIO_NUM_NC) {
+        gpio_set_direction(LCD_PWR_PIN, GPIO_MODE_OUTPUT);
+        gpio_set_level(LCD_PWR_PIN, !LCD_PWR_ON_LEVEL);   // power OFF
+    }
+    if (LCD_RST_PIN != GPIO_NUM_NC) {
+        gpio_set_direction(LCD_RST_PIN, GPIO_MODE_OUTPUT);
+        gpio_set_level(LCD_RST_PIN, 0);                    // hold reset
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // 3. Nullify singleton so the next construct() starts fresh
+    rm690b0_singleton = NULL;
+}
+
 esp_lcd_panel_handle_t rm690b0_get_panel_handle(void) {
     if (rm690b0_singleton == NULL) {
         ESP_LOGW(TAG, "rm690b0_get_panel_handle: no active display instance");

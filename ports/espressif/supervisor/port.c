@@ -29,6 +29,7 @@
 #include "common-hal/dualbank/__init__.h"
 #include "common-hal/ps2io/Ps2.h"
 #include "common-hal/watchdog/WatchDogTimer.h"
+#include "common-hal/rm690b0/rm690b0_internal.h"
 #include "common-hal/socketpool/Socket.h"
 #include "common-hal/wifi/__init__.h"
 #include "supervisor/background_callback.h"
@@ -402,6 +403,10 @@ void reset_port(void) {
 
     #if CIRCUITPY_WATCHDOG
     watchdog_reset();
+    #endif
+
+    #if CIRCUITPY_RM690B0
+    rm690b0_reset();
     #endif
 
     // Yield so the idle task can run and do any IDF cleanup needed.

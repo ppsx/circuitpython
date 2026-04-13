@@ -356,6 +356,9 @@ extern const char *TAG;
 extern portMUX_TYPE rm690b0_spinlock;
 extern rm690b0_rm690b0_obj_t *rm690b0_singleton;
 
+// Called by reset_port() on soft reset to release stale hardware state.
+void rm690b0_reset(void);
+
 // ============================================================================
 // Inline helpers
 // ============================================================================
